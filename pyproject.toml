@@ -1,0 +1,14 @@
+[project]
+name = "transformer-tiny"
+version = "0.1.0"
+description = "Qwen3-0.6B inference written from scratch, as a learning exercise"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "transformers",
+    "safetensors",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
