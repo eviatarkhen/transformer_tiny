@@ -10,8 +10,8 @@ continue from "Next action".
 
 ## Next action
 
-**Step 0, Eviatar's part:** write `scripts/smoke.py` and run it.
-Waiting on his result before Step 1 theory.
+**Step 1.** Theory delivered; design of `config.py` / `weights.py` under discussion.
+Eviatar has not written code for this step yet.
 
 ---
 
@@ -19,8 +19,8 @@ Waiting on his result before Step 1 theory.
 
 | # | Step | State | Proven by |
 |---|---|---|---|
-| 0 | Environment + oracle | scaffolding done, smoke.py pending | — |
-| 1 | `config.py` + `weights.py` | not started | — |
+| 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
+| 1 | `config.py` + `weights.py` | in progress | — |
 | 2 | `rms_norm` | not started | — |
 | 3 | `rope` | not started | — |
 | 4 | `attention` | not started | — |
@@ -54,6 +54,12 @@ not assumed:
 - `Qwen3Attention.forward` takes `position_embeddings=(cos, sin)` precomputed by the
   model-level `rotary_emb`, not a position index.
 
+## Baseline (step 0)
+
+HF oracle, CPU, float32, no KV cache, `"The capital of France is"` + 10 tokens:
+**21-30 tok/s** across runs. Output: `Paris. The capital of Italy is Rome. The`
+Wide variance on a single untimed run — phase 4 comparisons need repeated runs.
+
 ## Gotchas
 
 Running list of things that actually bit us, and how they were found.
@@ -65,6 +71,9 @@ The highest-value section in this file — these are exactly what gets lost.
 - **`head_dim` (128) != `hidden_size / num_heads` (64)** in Qwen3. Code that derives
   head_dim by division is wrong here. HF itself uses
   `getattr(config, "head_dim", hidden_size // num_heads)`.
+- **`tokenizer.decode()` accepts a 2D tensor without raising** and returns a *list of
+  strings* instead of a string. Pass `ids[0]`. First instance of the project's dominant
+  failure mode: wrong rank, no exception, silently different result.
 
 ## Open questions
 
