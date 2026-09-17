@@ -10,8 +10,9 @@ continue from "Next action".
 
 ## Next action
 
-**Step 1.** Theory delivered; design of `config.py` / `weights.py` under discussion.
-Eviatar has not written code for this step yet.
+**Step 2: `rms_norm`.** Theory and design delivered. Eviatar implements
+`tiny/layers.py::rms_norm` plus `tests/test_rmsnorm.py`. The HF oracle fixture is
+in `tests/conftest.py` already.
 
 ---
 
@@ -20,8 +21,8 @@ Eviatar has not written code for this step yet.
 | # | Step | State | Proven by |
 |---|---|---|---|
 | 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
-| 1 | `config.py` + `weights.py` | in progress | — |
-| 2 | `rms_norm` | not started | — |
+| 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
+| 2 | `rms_norm` | in progress | — |
 | 3 | `rope` | not started | — |
 | 4 | `attention` | not started | — |
 | 5 | `mlp` | not started | — |
@@ -71,17 +72,33 @@ The highest-value section in this file — these are exactly what gets lost.
 - **`head_dim` (128) != `hidden_size / num_heads` (64)** in Qwen3. Code that derives
   head_dim by division is wrong here. HF itself uses
   `getattr(config, "head_dim", hidden_size // num_heads)`.
+- **A discarded return value is a test that always passes.** `torch.equal(a, b)`
+  without `assert` is legal Python and silently green. Same shape as the
+  `tokenizer.decode(...)` slip in smoke.py. Check every new test by feeding it
+  deliberately broken input and confirming it goes red.
+- **`json.loads` takes JSON text, `json.load` takes a file.** And a dataclass never
+  validates its annotations: `head_dim=["head_dim"]` (a missing `data`) produced a
+  `list` where an `int` was declared, with no error until much later.
 - **`tokenizer.decode()` accepts a 2D tensor without raising** and returns a *list of
   strings* instead of a string. Pass `ids[0]`. First instance of the project's dominant
   failure mode: wrong rank, no exception, silently different result.
 
 ## Open questions
 
-- Oracle style for component tests: invoking HF submodules standalone is awkward
-  (they need `position_embeddings`, an explicit causal mask, a `Cache` object).
-  Likely better: run the full HF model once with forward hooks registered, capture each
-  submodule's (input, output) pair, and test our functions against those captures.
-  To be decided together at Step 1 when `conftest.py` is designed.
+- Oracle style for *attention* (step 4): `Qwen3Attention.forward` needs
+  `position_embeddings`, an explicit causal mask and a `Cache`, so constructing it
+  standalone is awkward. Likely answer: run the full HF model once with forward hooks
+  and capture each submodule's (input, output) pair. Decide at step 4.
+  RMSNorm and MLP are simple enough to instantiate directly.
+
+## Design decisions (step 1)
+
+- `Config` is a frozen dataclass built by `Config.from_json(path)`; `model_dir()` wraps
+  `snapshot_download` so no cache path is hardcoded.
+- `load_weights()` returns a plain `dict[str, Tensor]` keyed exactly as the file is,
+  cast to float32. No wrapper object — nothing between the code and the numbers.
+- `layer_prefix(i)` -> `"model.layers.{i}."` keeps that string in one place.
+- Tests derive every expected shape from `config` fields, never from literals.
 
 ## Decisions log
 
