@@ -10,9 +10,9 @@ continue from "Next action".
 
 ## Next action
 
-**Step 3: `rope`.** Theory complete, design agreed, stubs written. Eviatar
-implements `rope_cos_sin`, `rotate_half` and `apply_rope` in `tiny/layers.py`, plus
-the 6 tests in `tests/test_rope.py` (currently skipped).
+**Step 4: `attention`.** Not started -- theory not yet delivered. This is the
+biggest step: GQA, the causal mask, the 1/sqrt(d) scale, and where q_norm/k_norm and
+RoPE slot in. Decide the oracle style first (see Open questions).
 
 ---
 
@@ -23,8 +23,8 @@ the 6 tests in `tests/test_rope.py` (currently skipped).
 | 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
 | 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
 | 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
-| 3 | `rope` | in progress | — |
-| 4 | `attention` | not started | — |
+| 3 | `rope` | **done** | `tests/test_rope.py`, 6 tests |
+| 4 | `attention` | next | — |
 | 5 | `mlp` | not started | — |
 | 6 | `block` | not started | — |
 | 7 | full model | not started | — |
@@ -79,6 +79,27 @@ rms_norm mutation matrix (final, after adding the small-input parity case):
 
 `test_zero_input_is_finite` caught none of these; it only fires if eps is dropped
 entirely.
+
+### rope mutation matrix
+
+| mutation | caught by |
+|---|---|
+| identity apply_rope | apply_hf, relative |
+| sin/cos swapped | apply_hf, pos0 |
+| rotate_half without negation | apply_hf, norm, relative |
+| adjacent (interleaved) pairing | all but pos0 |
+| no duplication / 128 frequencies | all but pos0 |
+| positions off by one | cos_sin_hf, apply_hf, pos0 |
+
+Two lessons recorded from it:
+
+- `test_depends_only_on_relative_position` only catches an identity `apply_rope`
+  because of its second clause (a *different* gap must give a *different* score).
+  Whenever a test asserts "these two things are equal", ask what trivial
+  implementation makes everything equal, and add the clause that rules it out.
+- "sin/cos swapped" legitimately passes the relative-position test: it is still a
+  rotation linear in position, so the property genuinely still holds. A property
+  test claims its property and nothing more.
 
 ## Gotchas
 
