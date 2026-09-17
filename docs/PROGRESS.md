@@ -10,10 +10,9 @@ continue from "Next action".
 
 ## Next action
 
-**Step 3: `rope`.** Theory delivery was interrupted partway. Resume by finishing
-the theory (see "Step 3 theory" below for what has and has not been covered), then
-agree the design, then Eviatar implements `tiny/layers.py` + `tests/test_rope.py`.
-No step 3 code exists yet.
+**Step 3: `rope`.** Theory complete, design agreed, stubs written. Eviatar
+implements `rope_cos_sin`, `rotate_half` and `apply_rope` in `tiny/layers.py`, plus
+the 6 tests in `tests/test_rope.py` (currently skipped).
 
 ---
 
@@ -24,7 +23,7 @@ No step 3 code exists yet.
 | 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
 | 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
 | 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
-| 3 | `rope` | not started | — |
+| 3 | `rope` | in progress | — |
 | 4 | `attention` | not started | — |
 | 5 | `mlp` | not started | — |
 | 6 | `block` | not started | — |
@@ -143,7 +142,23 @@ Covered with Eviatar already:
    Fast pairs distinguish nearby positions precisely; slow pairs carry long-range
    information. Like 64 clock hands at different speeds.
 
-Still to cover before he implements:
+All of the above is now delivered, plus:
+
+5. `rotate_half` implements the 2-D rotation: `out = x*cos + rotate_half(x)*sin`
+   expands to `out[i] = x[i]cos - x[i+64]sin` and `out[i+64] = x[i+64]cos + x[i]sin`,
+   which is only correct because `cos[i+64] == cos[i]` -- the reason for the
+   `cat((angles, angles))` duplication.
+6. RoPE applies to q and k only, never v: it changes the addressing, not the payload.
+7. Order inside attention: project -> reshape to heads -> q_norm/k_norm -> transpose
+   -> RoPE -> scores -> o_proj.
+
+Oracle behaviour verified directly:
+- `rotary_emb(dummy, position_ids)` -> cos, sin each (batch, seq, 128)
+- `cos[:, 0] == cos[:, 64]` is True
+- at position 0, cos=1 and sin=0, so RoPE is the identity there
+- norm is preserved at every position
+
+Superseded (was: still to cover):
 
 - How `rotate_half` implements a 2D rotation of the pair (x_i, x_{i+64}), and why
   cos/sin are duplicated via `cat((freqs, freqs), -1)`.
