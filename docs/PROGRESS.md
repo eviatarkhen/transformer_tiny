@@ -10,9 +10,10 @@ continue from "Next action".
 
 ## Next action
 
-**Step 4: `attention`.** Not started -- theory not yet delivered. This is the
-biggest step: GQA, the causal mask, the 1/sqrt(d) scale, and where q_norm/k_norm and
-RoPE slot in. Decide the oracle style first (see Open questions).
+**Step 4: `attention`.** Not started; theory not yet delivered. The biggest step:
+splitting into heads, GQA, the causal mask, the 1/sqrt(d) scale, and slotting in
+q_norm/k_norm and RoPE. The oracle question is now settled -- see "Step 4 oracle"
+below. Deliver the theory first, then agree the design, then Eviatar implements.
 
 ---
 
@@ -219,13 +220,32 @@ Eviatar has not yet written the per-step notes (`docs/00-overview.md`,
 `01-weights.md`, `02-rmsnorm.md`). Only PROGRESS.md exists. Do not assume the notes
 are there when resuming.
 
+## Step 4 oracle: settled, calling the module directly works
+
+Measured directly, not assumed. Forward hooks are NOT needed.
+
+```python
+attn = hf_model.model.layers[0].self_attn
+cos, sin = hf_model.model.rotary_emb(x, torch.arange(seq).unsqueeze(0))
+with torch.no_grad():
+    out, attn_weights = attn(x, position_embeddings=(cos, sin), attention_mask=mask)
+```
+
+- `x` is `(batch, seq, hidden_size)`; the call returns a 2-tuple, output first.
+- `hf_model.config._attn_implementation` is **`"sdpa"`** by default.
+- An additive float mask is `torch.full((seq, seq), -inf).triu(1)[None, None]`,
+  shape (1, 1, seq, seq), 0 where allowed and -inf where forbidden.
+- **Under sdpa, `attention_mask=None` gives output identical to that explicit causal
+  mask (max diff 0.0), and both are genuinely causal**: changing only the last token
+  leaves every earlier position's output bit-identical. So the oracle is causal
+  whether or not a mask is passed, and our implementation must be causal to match it.
+- Not measured: whether `attention_mask=None` is also causal under the `eager`
+  implementation. Do not assume it is. If the test ever switches implementation,
+  re-check.
+
 ## Open questions
 
-- Oracle style for *attention* (step 4): `Qwen3Attention.forward` needs
-  `position_embeddings`, an explicit causal mask and a `Cache`, so constructing it
-  standalone is awkward. Likely answer: run the full HF model once with forward hooks
-  and capture each submodule's (input, output) pair. Decide at step 4.
-  RMSNorm and MLP are simple enough to instantiate directly.
+- (none open for step 4)
 
 ## Design decisions (step 1)
 
