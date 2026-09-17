@@ -10,9 +10,8 @@ continue from "Next action".
 
 ## Next action
 
-**Step 2: `rms_norm`.** Theory and design delivered. Eviatar implements
-`tiny/layers.py::rms_norm` plus `tests/test_rmsnorm.py`. The HF oracle fixture is
-in `tests/conftest.py` already.
+**Step 3: `rope`.** Theory and design delivered. Eviatar implements
+`tiny/layers.py::rope_cos_sin` and `apply_rope`, plus `tests/test_rope.py`.
 
 ---
 
@@ -22,8 +21,8 @@ in `tests/conftest.py` already.
 |---|---|---|---|
 | 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
 | 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
-| 2 | `rms_norm` | in progress | — |
-| 3 | `rope` | not started | — |
+| 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
+| 3 | `rope` | in progress | — |
 | 4 | `attention` | not started | — |
 | 5 | `mlp` | not started | — |
 | 6 | `block` | not started | — |
@@ -61,6 +60,25 @@ HF oracle, CPU, float32, no KV cache, `"The capital of France is"` + 10 tokens:
 **21-30 tok/s** across runs. Output: `Paris. The capital of Italy is Rome. The`
 Wide variance on a single untimed run — phase 4 comparisons need repeated runs.
 
+## Testing method that is working
+
+**Mutation testing.** After a component goes green, break it deliberately several
+ways and record which tests catch which mutation. It found a real hole in the
+rms_norm suite that five passing tests missed. Keep doing this at every step.
+
+rms_norm mutation matrix (final, after adding the small-input parity case):
+
+| mutation | caught by |
+|---|---|
+| no keepdim | all four |
+| no sqrt | all four |
+| eps outside sqrt | **only** parity at input scale 1e-4 |
+| weight ignored | parity only |
+| mean not squared | parity, unit_rms |
+
+`test_zero_input_is_finite` caught none of these; it only fires if eps is dropped
+entirely.
+
 ## Gotchas
 
 Running list of things that actually bit us, and how they were found.
@@ -72,6 +90,17 @@ The highest-value section in this file — these are exactly what gets lost.
 - **`head_dim` (128) != `hidden_size / num_heads` (64)** in Qwen3. Code that derives
   head_dim by division is wrong here. HF itself uses
   `getattr(config, "head_dim", hidden_size // num_heads)`.
+- **`assert_close` raises, `torch.equal`/`allclose` return.** Wrapping assert_close
+  in `assert ... is None` is a no-op. Know which style a helper uses.
+- **`dataclasses.fields()` returns `Field` objects, not strings** — use `.name`.
+- **eps placement is invisible at normal magnitudes.** `sqrt(v+eps)` vs
+  `sqrt(v)+eps` differ by ~1e-6 on unit-scale input, far under any useful
+  tolerance. Only a deliberately tiny input (mean(x^2) comparable to eps) separates
+  them. Generalizes: a term that is negligible in the common case needs a test case
+  where it is not negligible.
+- **rms_norm is memory-bandwidth bound**, so rsqrt-vs-divide measured identical
+  (4.6us both, at (1,5,1024)). Instruction-count optimizations that do not reduce
+  data movement do nothing here.
 - **A discarded return value is a test that always passes.** `torch.equal(a, b)`
   without `assert` is legal Python and silently green. Same shape as the
   `tokenizer.decode(...)` slip in smoke.py. Check every new test by feeding it

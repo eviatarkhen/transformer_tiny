@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 import torch
@@ -11,18 +12,6 @@ GLOBAL_KEYS = [
     "lm_head.weight",
 ]
 
-CONFIG_FIELDS = [
-    "hidden_size",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "intermediate_size",
-    "vocab_size",
-    "rms_norm_eps",
-    "rope_theta",
-    "tie_word_embeddings"
-]
 
 def expected_layer_shapes(config):
     q = config.num_attention_heads * config.head_dim
@@ -31,7 +20,7 @@ def expected_layer_shapes(config):
         'self_attn.q_proj.weight': (q, config.hidden_size),
         'self_attn.k_proj.weight': (kv, config.hidden_size),
         'self_attn.v_proj.weight': (kv, config.hidden_size),
-        'self_attn.o_proj.weight': (config.hidden_size, config.num_attention_heads * config.head_dim),
+        'self_attn.o_proj.weight': (config.hidden_size, q),
         'mlp.gate_proj.weight':    (config.intermediate_size, config.hidden_size),
         'mlp.up_proj.weight':      (config.intermediate_size, config.hidden_size),
         'mlp.down_proj.weight':    (config.hidden_size, config.intermediate_size),
@@ -46,8 +35,8 @@ def test_config_matches_json(config):
     with open(model_dir() / 'config.json') as f:
         file_config = json.load(f)
 
-    for field in CONFIG_FIELDS:
-        assert getattr(config, field) == file_config[field]
+    for field in dataclasses.fields(config):
+        assert getattr(config, field.name) == file_config[field.name]
 
 
 def test_head_dim_is_not_hidden_over_heads(config):
@@ -80,8 +69,9 @@ def test_shapes(config, weights):
 
     layer_shapes = expected_layer_shapes(config)
     for i in range(config.num_hidden_layers):
+        prefix = layer_prefix(i)
         for name, value in layer_shapes.items():
-            assert weights[layer_prefix(i) + name].shape == value
+            assert weights[prefix + name].shape == value
 
 
 def test_all_float32(weights):
