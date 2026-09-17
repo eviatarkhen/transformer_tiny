@@ -60,7 +60,7 @@ def test_all_keys_present(config, weights):
 
     assert tensors == len(weights)
 
-        
+ 
 def test_shapes(config, weights):
     """Every tensor has the shape config implies.
     """

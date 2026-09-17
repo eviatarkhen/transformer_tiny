@@ -24,8 +24,8 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
           Write it against the last dimension and both work. `keepdim=True` on
           the mean is what keeps the broadcast right.
     """
-    rms = (x.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
-    return x * rms * weight
+    inv_rms = (x.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
+    return x * inv_rms * weight
 
 
 def rope_cos_sin(

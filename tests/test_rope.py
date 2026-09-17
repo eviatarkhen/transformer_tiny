@@ -8,7 +8,7 @@ def test_cos_sin_matches_hf(config, hf_model):
     """Our angle table equals HF's rotary_emb output."""
     seq = 5
     positions = torch.arange(seq)
-    hf_cos, hf_sin = hf_model.model.rotary_emb(torch.zeros(1, seq, config.hidden_size), 
+    hf_cos, hf_sin = hf_model.model.rotary_emb(torch.zeros(1, seq, config.hidden_size),
                                                positions.unsqueeze(0))
     cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
     torch.testing.assert_close(cos, hf_cos[0], atol=1e-4, rtol=1e-5)
@@ -46,7 +46,6 @@ def test_pairs_share_an_angle(config):
     h = config.head_dim // 2
     assert torch.equal(cos[:, :h], cos[:, h:])
     assert torch.equal(sin[:, :h], sin[:, h:])
-    
 
 
 def test_position_zero_is_identity(config):
@@ -60,7 +59,6 @@ def test_position_zero_is_identity(config):
     out = apply_rope(x, cos, sin)
 
     assert torch.equal(out[:, :, 0], x[:, :, 0])
-    
 
 
 def test_preserves_norm(config):

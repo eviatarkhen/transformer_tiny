@@ -52,7 +52,6 @@ def test_scale_invariance(config, weights):
     norm_weights = weights[layer_prefix(0)+"self_attn.q_norm.weight"]
     out = rms_norm(x, norm_weights, config.rms_norm_eps)
     out_scaled = rms_norm(x*7, norm_weights, config.rms_norm_eps)
-    
     torch.testing.assert_close(out, out_scaled, atol=1e-4, rtol=1e-5)
 
 
