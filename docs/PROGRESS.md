@@ -216,9 +216,10 @@ describe the *other* pairing convention.
 
 ## Note on docs/
 
-Eviatar has not yet written the per-step notes (`docs/00-overview.md`,
-`01-weights.md`, `02-rmsnorm.md`). Only PROGRESS.md exists. Do not assume the notes
-are there when resuming.
+`00-overview.md`, `01-weights.md`, `02-rmsnorm.md` and `03-rope.md` exist but were
+**drafted by Claude at Eviatar's request**, not written by him. Each is marked as a
+draft pending his edit pass. The working agreement still has him writing these in his
+own words -- treat the drafts as a starting point for that, not as a replacement.
 
 ## Step 4 oracle: settled, calling the module directly works
 
