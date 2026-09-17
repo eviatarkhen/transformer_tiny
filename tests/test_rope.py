@@ -1,20 +1,4 @@
-"""Step 3: RoPE matches HuggingFace, and has the property it exists for.
-
-The oracle:
-
-    position_ids = torch.arange(seq).unsqueeze(0)          # (1, seq)
-    dummy = torch.zeros(1, seq, config.hidden_size)        # only read for dtype
-    cos, sin = hf_model.model.rotary_emb(dummy, position_ids)   # (1, seq, 128)
-
-    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
-    q_out, k_out = apply_rotary_pos_emb(q, k, cos, sin)
-
-Ours returns (seq, head_dim), so compare against hf_cos[0].
-"""
-
-import pytest
 import torch
-
 from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 from tiny.layers import apply_rope, rope_cos_sin
@@ -26,10 +10,9 @@ def test_cos_sin_matches_hf(config, hf_model):
     positions = torch.arange(seq)
     hf_cos, hf_sin = hf_model.model.rotary_emb(torch.zeros(1, seq, config.hidden_size), 
                                                positions.unsqueeze(0))
-
     cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
-    torch.testing.assert_close(hf_cos[0], cos, atol=1e-4, rtol=1e-5)
-    torch.testing.assert_close(hf_sin[0], sin, atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(cos, hf_cos[0], atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(sin, hf_sin[0], atol=1e-4, rtol=1e-5)
 
 
 def test_apply_rope_matches_hf(config, hf_model):
@@ -40,15 +23,14 @@ def test_apply_rope_matches_hf(config, hf_model):
     positions = torch.arange(seq)
     dummy = torch.zeros(1, seq, config.hidden_size)
     hf_cos, hf_sin = hf_model.model.rotary_emb(dummy, positions.unsqueeze(0))
-    cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
 
     torch.manual_seed(0)
-    q = torch.randn(1, config.num_attention_heads, seq, config.head_dim)   # (1, 16, 5, 128)
-    k = torch.randn(1, config.num_key_value_heads, seq, config.head_dim)   # (1,  8, 5, 128)
+    q = torch.randn(1, config.num_attention_heads, seq, config.head_dim)
+    k = torch.randn(1, config.num_key_value_heads, seq, config.head_dim)
     q_out, _ = apply_rotary_pos_emb(q, k, hf_cos, hf_sin)
 
-    x_out = apply_rope(q, cos, sin)
-    torch.testing.assert_close(q_out, x_out, atol=1e-4, rtol=1e-5)
+    x_out = apply_rope(q, hf_cos[0], hf_sin[0])
+    torch.testing.assert_close(x_out, q_out, atol=1e-4, rtol=1e-5)
 
 
 def test_pairs_share_an_angle(config):

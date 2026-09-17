@@ -44,6 +44,6 @@ class Config:
             tie_word_embeddings=bool(data["tie_word_embeddings"])
         )
 
-    
+
 def model_dir(model_id: str = MODEL_ID) -> Path:
     return Path(snapshot_download(model_id))

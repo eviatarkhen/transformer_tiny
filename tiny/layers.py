@@ -25,7 +25,7 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
           the mean is what keeps the broadcast right.
     """
     rms = (x.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
-    return x * rms * weight 
+    return x * rms * weight
 
 
 def rope_cos_sin(
@@ -46,8 +46,8 @@ def rope_cos_sin(
         (batch, heads, seq, head_dim) unchanged.
     """
     inv_freq = 1 / (theta ** (torch.arange(0, head_dim, 2) / head_dim))
-    angles   = positions.float()[:, None] * inv_freq[None, :]
-    table    = torch.cat([angles, angles], dim=-1)
+    angles = positions.float()[:, None] * inv_freq[None, :]
+    table = torch.cat([angles, angles], dim=-1)
     return table.cos(), table.sin()
 
 
