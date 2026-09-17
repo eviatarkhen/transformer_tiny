@@ -10,8 +10,8 @@ continue from "Next action".
 
 ## Next action
 
-**Step 3: `rope`.** Theory and design delivered. Eviatar implements
-`tiny/layers.py::rope_cos_sin` and `apply_rope`, plus `tests/test_rope.py`.
+**Step 3: `rope`.** Not started. Theory to be delivered next, then design agreed,
+then Eviatar implements. Nothing written for this step yet.
 
 ---
 
@@ -22,7 +22,7 @@ continue from "Next action".
 | 0 | Environment + oracle | **done** | `scripts/smoke.py` runs |
 | 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
 | 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
-| 3 | `rope` | in progress | — |
+| 3 | `rope` | not started | — |
 | 4 | `attention` | not started | — |
 | 5 | `mlp` | not started | — |
 | 6 | `block` | not started | — |
@@ -111,6 +111,23 @@ The highest-value section in this file — these are exactly what gets lost.
 - **`tokenizer.decode()` accepts a 2D tensor without raising** and returns a *list of
   strings* instead of a string. Pass `ids[0]`. First instance of the project's dominant
   failure mode: wrong rank, no exception, silently different result.
+
+## Verified facts about HF's RoPE (read from the installed v5 source)
+
+Needed before writing the step 3 spec; do not trust tutorials, which usually
+describe the *other* pairing convention.
+
+- `inv_freq = 1 / (theta ** (arange(0, head_dim, 2) / head_dim))` -> 64 frequencies
+  for head_dim=128.
+- `Qwen3RotaryEmbedding.forward` builds `freqs = outer(positions, inv_freq)` of shape
+  (batch, seq, 64), then `emb = cat((freqs, freqs), -1)` -> (batch, seq, 128), and
+  returns `cos = emb.cos()`, `sin = emb.sin()`. `attention_scaling` is 1.0 for
+  default rope, so it can be ignored.
+- `rotate_half(x)` splits the last dim in **halves**: `cat((-x[..., 64:], x[..., :64]))`.
+  So dimension i is paired with dimension i+64 -- NOT the interleaved (0,1),(2,3)
+  pairing from the original RoPE paper. Both are valid; only one matches these weights.
+- `apply_rotary_pos_emb(q, k, cos, sin)` = `q * cos + rotate_half(q) * sin`, with
+  cos/sin unsqueezed at dim 1 to broadcast over heads.
 
 ## Open questions
 
