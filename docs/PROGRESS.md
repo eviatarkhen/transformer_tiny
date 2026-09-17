@@ -10,8 +10,10 @@ continue from "Next action".
 
 ## Next action
 
-**Step 3: `rope`.** Not started. Theory to be delivered next, then design agreed,
-then Eviatar implements. Nothing written for this step yet.
+**Step 3: `rope`.** Theory delivery was interrupted partway. Resume by finishing
+the theory (see "Step 3 theory" below for what has and has not been covered), then
+agree the design, then Eviatar implements `tiny/layers.py` + `tests/test_rope.py`.
+No step 3 code exists yet.
 
 ---
 
@@ -112,6 +114,52 @@ The highest-value section in this file — these are exactly what gets lost.
   strings* instead of a string. Pass `ids[0]`. First instance of the project's dominant
   failure mode: wrong rank, no exception, silently different result.
 
+## Step 3 theory: delivered so far
+
+Covered with Eviatar already:
+
+1. **Attention is permutation equivariant** -- demonstrated empirically, not asserted.
+   Three tokens A,B,C through a plain attention layer, then reordered to C,A,B: every
+   output row identical, just reordered (max diff 1.5e-08). So a transformer with no
+   positional signal cannot tell "dog bit man" from "man bit dog". Position must be
+   injected deliberately; it is not emergent.
+2. **Why not GPT-2's learned absolute position vectors**: fixed max length, nothing in
+   the representation says position 5 and 6 are adjacent, and language mostly cares
+   about *relative* distance anyway.
+3. **RoPE's core idea**: a dot product depends on the angle *between* two vectors.
+   Rotate q by an angle proportional to its position m and k by one proportional to n,
+   and `cos((a-b) + (m-n)*angle)` -- absolute positions cancel, only m-n survives.
+4. **The frequency spectrum** (head_dim=128, theta=1e6 -> 64 frequencies):
+
+   | pair i | inv_freq | full turn every |
+   |---|---|---|
+   | 0 | 1.000e+00 | 6.3 tokens |
+   | 8 | 1.778e-01 | 35.3 tokens |
+   | 16 | 3.162e-02 | 198.7 tokens |
+   | 32 | 1.000e-03 | 6,283 tokens |
+   | 48 | 3.162e-05 | 198,692 tokens |
+   | 63 | 1.241e-06 | 5,063,256 tokens |
+
+   Fast pairs distinguish nearby positions precisely; slow pairs carry long-range
+   information. Like 64 clock hands at different speeds.
+
+Still to cover before he implements:
+
+- How `rotate_half` implements a 2D rotation of the pair (x_i, x_{i+64}), and why
+  cos/sin are duplicated via `cat((freqs, freqs), -1)`.
+- Why RoPE is applied to q and k only, never to v (it steers *where* attention looks,
+  not *what* is retrieved).
+- Where it sits in the order: after q_norm/k_norm, before the scores; per head, on the
+  last dimension.
+- The design: proposed `rope_cos_sin(positions, head_dim, theta) -> (cos, sin)` each
+  (seq, head_dim), and `apply_rope(x, cos, sin)` with x as (batch, heads, seq, head_dim)
+  so (seq, head_dim) broadcasts. Taking `positions` as a tensor rather than a length
+  means step 9's KV cache needs no offset parameter.
+- Test plan: parity of cos/sin vs HF `rotary_emb`; parity of apply_rope vs HF
+  `apply_rotary_pos_emb`; property tests for norm preservation, position 0 being the
+  identity, and the relative-position property
+  (dot(rope(q,m), rope(k,n)) depends only on m-n).
+
 ## Verified facts about HF's RoPE (read from the installed v5 source)
 
 Needed before writing the step 3 spec; do not trust tutorials, which usually
@@ -128,6 +176,12 @@ describe the *other* pairing convention.
   pairing from the original RoPE paper. Both are valid; only one matches these weights.
 - `apply_rotary_pos_emb(q, k, cos, sin)` = `q * cos + rotate_half(q) * sin`, with
   cos/sin unsqueezed at dim 1 to broadcast over heads.
+
+## Note on docs/
+
+Eviatar has not yet written the per-step notes (`docs/00-overview.md`,
+`01-weights.md`, `02-rmsnorm.md`). Only PROGRESS.md exists. Do not assume the notes
+are there when resuming.
 
 ## Open questions
 
