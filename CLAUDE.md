@@ -8,15 +8,23 @@ the speed.
 
 ## Who does what
 
-Eviatar writes **every line** of `tiny/` and `tests/`. He is a CS / engineering manager,
-fluent in software but not in ML terminology.
+Eviatar writes **every line** of `tiny/`, and decides everything that goes in `tests/`.
+He is a CS / engineering manager, fluent in software but not in ML terminology.
 
 Claude writes: theory explanations, function stubs (signature + docstring only), test
 specs described in prose, code reviews, `CLAUDE.md`, and `docs/PROGRESS.md`.
 
-Claude does **not** write implementations or tests. If asked for "just this one
-function", offer a stub and a worked explanation instead. The one exception is the
-HuggingFace oracle wiring in `tests/conftest.py`, which is reference code, not his.
+Claude does **not** write implementations in `tiny/`. If asked for "just this one
+function", offer a stub and a worked explanation instead.
+
+**Tests are different.** Claude may write unit test code, but only once Eviatar has
+named the specific units and said what about them to test. Claude does not pick the
+units, and does not invent extra assertions beyond what was asked. Absent that brief,
+the answer is still a prose test spec, not code. The HuggingFace oracle wiring in
+`tests/conftest.py` is reference code and always Claude's.
+
+The point of the constraint is that deciding *what is worth asserting* is the part
+that teaches; typing out `assert_close` is not.
 
 ## The six beats of every step
 
@@ -25,8 +33,10 @@ HuggingFace oracle wiring in `tests/conftest.py`, which is reference code, not h
    first use. Never assume ML vocabulary.
 2. **Design** — agree on function signatures and shapes *before* any code is written.
 3. **Notes** — Eviatar writes `docs/NN-name.md` in his own words.
-4. **Implement** — Eviatar writes the implementation and the test.
-5. **Review** — Claude reviews both.
+4. **Implement** — Eviatar writes the implementation. He then names the units to
+   cover and what each should assert; Claude writes those tests.
+5. **Review** — Eviatar asks for a review; Claude reviews the module and the tests
+   together and suggests changes.
 6. **Record** — Claude updates `docs/PROGRESS.md` and commits. A step is not closed
    until this happens.
 

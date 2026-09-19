@@ -10,10 +10,14 @@ continue from "Next action".
 
 ## Next action
 
-**Step 4: `attention`.** Not started; theory not yet delivered. The biggest step:
-splitting into heads, GQA, the causal mask, the 1/sqrt(d) scale, and slotting in
-q_norm/k_norm and RoPE. The oracle question is now settled -- see "Step 4 oracle"
-below. Deliver the theory first, then agree the design, then Eviatar implements.
+**Step 5: `mlp`.** Not started; theory not yet delivered. SwiGLU over
+`gate_proj` / `up_proj` / `down_proj`, intermediate_size 3072, no biases. Much
+smaller than step 4 -- no heads, no positions, no mask. Oracle is
+`hf_model.model.layers[0].mlp`, callable directly like `self_attn` was.
+
+Deliver the theory first, then agree the design, then Eviatar implements. Note
+the working agreement changed during step 4 -- see `CLAUDE.md`: Claude may now
+write test code, but only after Eviatar names the units and what to assert.
 
 ---
 
@@ -25,8 +29,8 @@ below. Deliver the theory first, then agree the design, then Eviatar implements.
 | 1 | `config.py` + `weights.py` | **done** | `tests/test_weights.py`, 7 tests |
 | 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
 | 3 | `rope` | **done** | `tests/test_rope.py`, 6 tests |
-| 4 | `attention` | next | — |
-| 5 | `mlp` | not started | — |
+| 4 | `attention` | **done** | `tests/test_attention.py`, 51 tests |
+| 5 | `mlp` | next | — |
 | 6 | `block` | not started | — |
 | 7 | full model | not started | — |
 | 8 | greedy generation | not started | — |
@@ -107,6 +111,33 @@ Two lessons recorded from it:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **`k_proj` and `v_proj` are square (1024x1024), so a missing `.T` is silent.**
+  Weights are stored `(out, in)`, so a projection is `x @ W.T`. Measured across all
+  four: `q_proj` (2048,1024) and `o_proj` (1024,2048) *raise* on `x @ W`, but
+  `k_proj` and `v_proj` return the correct shape with values off by 7.741 and
+  4.799. Writing all four at once and only checking the end hides two of them.
+  This is the argument for validating stage by stage.
+- **`.T` on a tensor of rank > 2 reverses *every* dimension**, turning
+  (1,16,5,128) into (128,5,16,1). It is deprecated and currently only *warns*, so
+  it does not announce itself. Use `transpose(-2, -1)` to swap the last two axes.
+- **`transpose(-2,-1)` and `transpose(1,2)` are not interchangeable**, and which is
+  correct depends on the layout at that line. On `(batch, seq, heads, head_dim)`
+  you want `transpose(1, 2)`; on `(batch, heads, seq, head_dim)` heading into the
+  scores matmul you want `transpose(-2, -1)`. Track the shape, not the axis number.
+- **Under sdpa the attention call returns `None` for the weights.** Confirmed at
+  `transformers/integrations/sdpa_attention.py:170` (`return attn_output, None`).
+  To inspect or compare the softmax weights, go through `eager_attention_forward`,
+  which takes the module as its first argument and returns its output already
+  transposed to (batch, seq, heads, head_dim).
+- **`.triu(1)` zeroes the lower triangle rather than removing it.** So
+  `isneginf(mask.triu(1)).all()` is False for a correct mask -- those zeros are not
+  -inf. Index with a boolean instead. Cost one red test that looked like an
+  implementation bug and was not.
+- **A uniform position shift is a no-op for RoPE, by construction.** A test
+  comparing positions 0-4 against 100-104 and expecting a difference got
+  byte-identical output: every *relative* distance is unchanged, and RoPE depends
+  only on those. To make the output move, change the gaps (`arange(seq) * 3`), not
+  the offset.
 - **transformers is v5, checkpoint is from v4.51.** Module paths and call signatures
   differ from most tutorials and from memory. Always check the installed source before
   writing a spec against it.
@@ -244,9 +275,84 @@ with torch.no_grad():
   implementation. Do not assume it is. If the test ever switches implementation,
   re-check.
 
+## Step 4: design decisions
+
+- `attention(x, w, config, layer, cos, sin) -> y`. Weights come from the full dict
+  via `layer_prefix(layer) + "self_attn."`, bound once as `p`.
+- **`cos`/`sin` are supplied by the caller, never rebuilt inside.** All 28 layers
+  share one table, and once a KV cache exists only the caller knows the true
+  positions -- seq=1 can mean position 100. This is the step 3 decision
+  (`rope_cos_sin` takes a positions *tensor*) finally paying off.
+- Helpers, each with a name from the domain: `project`, `split_heads`,
+  `merge_heads`, `repeat_kv`, `causal_mask`, `attend`.
+- `split_heads` folds in the transpose, so `rms_norm` runs *after* it rather than
+  before as in HF. Equivalent, because `rms_norm` reduces over the last axis and
+  `transpose(1, 2)` does not move it. Confirmed by exact-0.0 eager parity.
+- Scale is `* head_dim**-0.5`, matching HF's literal operation rather than
+  `/ sqrt(head_dim)`. Mathematically identical; using HF's spelling took eager
+  parity from 1.4e-06 to exactly 0.0.
+- `attend` reads its scale off `q.shape[-1]` rather than taking config, so it can
+  be unit tested at head_dim=4 with hand-computed weights and no model.
+- Lives in `tiny/attention.py`, not `tiny/layers.py` as the CLAUDE.md layout
+  sketch had it.
+
+## Step 4 mutation matrix
+
+Twelve mutations, none survived. The interesting result was *which* tests caught
+them: seven were caught **only** by the two HF parity tests. Splitting by where the
+bug lived explained it -- every mutation to a *helper* was caught by that helper's
+own unit test, and every mutation caught by parity alone lived inline in
+`attention` itself.
+
+That is a localization problem, not a detection one, and the fix was a smaller
+unit rather than more tests. Extracting `attend` (scores, scale, mask, softmax,
+blend) moved four of them:
+
+| mutation | caught without the oracle |
+|---|---|
+| merge_heads without the transpose | `merge_heads_inverts_split_heads` |
+| split_heads with transpose(-2,-1) | `split_heads_matches_hf_layout` |
+| repeat_kv tiling instead of interleaving | `repeat_kv_matches_hf`, `repeat_kv_pairs_adjacent_heads` |
+| mask `triu(0)` | `causal_mask_structure`, `is_causal` |
+| project missing `.T` | `project_matches_hf` |
+| attend: no 1/sqrt(d) scale | `attend_scale_is_one_over_sqrt_head_dim` |
+| attend: scale 1/d | `attend_scale_is_one_over_sqrt_head_dim` |
+| attend: no mask | `attend_first_position_returns_its_own_value`, `attend_is_causal` |
+| attend: softmax dim=-2 | three `attend` tests |
+| cos/sin recomputed internally | `uses_the_cos_sin_arguments` -- **oracle misses this entirely** |
+| q_norm / k_norm weights swapped | nothing -- oracle only |
+| rope applied to v as well | nothing -- oracle only |
+
+Three lessons recorded, the first two new:
+
+- **Testability follows decomposition.** If a bug can only be caught end to end,
+  the unit is too big. More tests would not have fixed it; a smaller function did.
+- **Wiring bugs are uncatchable by unit tests, correctly.** Swapped norm weights
+  and RoPE-on-v leave every individual function correct. That is what the
+  integration test is for. A suite where the end-to-end test covers the wiring and
+  nothing else is the healthy shape, not a gap.
+- **A mutation matrix is only as good as the mutations you think to write.** The
+  first pass missed both the dropped `.T` in `project` and the internally-recomputed
+  cos/sin -- the second being the one mutation the oracle cannot see at all.
+
+The long-form version is in `docs/04-attention.md` under "Decomposition and
+testability".
+
+## Working agreement change (2026-09-19)
+
+Recorded in `CLAUDE.md`. Claude may now write unit **test** code, but only once
+Eviatar has named the specific units and said what to assert about each; Claude
+does not pick the units or add assertions beyond the brief. Implementations in
+`tiny/` remain his. Two project skills were added to carry this:
+`.claude/skills/implementation-feedback` and `.claude/skills/testing-feedback`.
+
+Caveat for whoever reads this next: `tests/test_attention.py` was written *before*
+that rule existed, with Claude choosing the units. It is the one file in `tests/`
+not produced under the current agreement.
+
 ## Open questions
 
-- (none open for step 4)
+- (none open for step 5)
 
 ## Design decisions (step 1)
 
