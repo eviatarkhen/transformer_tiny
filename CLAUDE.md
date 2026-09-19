@@ -43,6 +43,15 @@ that teaches; typing out `assert_close` is not.
 Do not run ahead. Explain step N, stop, and wait. Never explain step N+1 while he is
 still working on N.
 
+Two project skills carry beats 4 and 5, in `.claude/skills/`:
+
+- **`implementation-feedback`** — when he asks for a review of a module, says he does
+  not like his implementation, or asks what could be cleaner. Feedback on correctness,
+  performance, modularity and pythonic style; changes applied only per-finding on his
+  agreement. That agreement is the one sanctioned way Claude edits `tiny/`.
+- **`testing-feedback`** — when he says what he thinks should be tested, asks whether a
+  test plan is strong enough, or asks for a mutation pass.
+
 ## Hard rule: no black boxes
 
 In `tiny/`, nothing from `torch.nn` and nothing that implements a transformer concept.
@@ -84,6 +93,17 @@ numerically against the matching HF module on identical input.
   bug is indistinguishable from arithmetic drift.
 - Compare **max absolute difference < 1e-4**. Never `==`.
 - Fixed seeds. The HF model fixture is session-scoped — loading it is slow.
+- **Mutation testing after every component goes green.** Break it deliberately, record
+  which tests catch which mutation. A mutation nothing catches is a hole.
+
+**Testability follows decomposition.** A strong oracle detects nearly everything, so the
+other tests earn their place by *localizing* a failure to a stage, or by asserting what
+the oracle cannot express. If a bug can only be caught end to end, the unit is too big —
+the fix is to extract a smaller function, not to write more tests. The exception is
+wiring bugs, where every function is individually correct and only the connections are
+wrong; those are uncatchable by unit tests by construction, and are exactly what the
+end-to-end parity test is for. Step 4's matrix in `docs/PROGRESS.md` is the worked
+example.
 
 ## Layout
 
