@@ -54,12 +54,23 @@ Two project skills carry beats 4 and 5, in `.claude/skills/`:
 
 ## Hard rule: no black boxes
 
-In `tiny/`, nothing from `torch.nn` and nothing that implements a transformer concept.
-Banned: `nn.Linear`, `nn.LayerNorm`, `nn.MultiheadAttention`,
-`F.scaled_dot_product_attention`, and anything from `transformers` modeling code.
+In `tiny/`, nothing that hides a **decision**. A call is banned if it carries any of:
+learned weights, a reduction axis, an `eps`, a mask, or a head layout — because
+choosing those correctly *is* the exercise. Banned: `nn.Linear`, `nn.LayerNorm`,
+`nn.MultiheadAttention`, `F.scaled_dot_product_attention`, and anything from
+`transformers` modeling code.
 
 Allowed: raw tensor ops — `matmul`/`@`, `softmax`, `exp`, `rsqrt`, `mean`, `cat`,
-`stack`, `reshape`, `view`, `transpose`, `arange`, indexing.
+`stack`, `reshape`, `view`, `transpose`, `arange`, indexing — **and parameter-free
+elementwise math, whichever namespace PyTorch happens to file it under**. That
+explicitly includes `F.silu`: it has no weights, no axis, no eps, no options, and one
+possible implementation. The `torch` vs `torch.nn.functional` split is an accident of
+PyTorch's API, not a statement about what is worth writing by hand.
+
+Amended 2026-09-23, during step 5, on Eviatar's challenge. The earlier wording banned
+`torch.nn` wholesale, which caught `F.silu` while allowing `torch.softmax` — two
+objects of exactly the same kind. A rule that the code visibly breaks stops being
+consulted, so the line moved to where the reasoning actually is.
 
 Claude uses `torch.nn` and `transformers` freely in `tests/` — that is the oracle.
 
@@ -110,7 +121,9 @@ example.
 ```
 tiny/config.py     # dataclass parsed from the model's config.json
 tiny/weights.py    # safetensors -> dict of tensors
-tiny/layers.py     # rms_norm, rope, attention, mlp
+tiny/layers.py     # primitives shared by components: project, rms_norm, rope
+tiny/attention.py  # grouped-query causal self-attention
+tiny/mlp.py        # SwiGLU feed-forward
 tiny/model.py      # block, forward
 tiny/generate.py   # sampling loop
 ```

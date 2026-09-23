@@ -1,6 +1,12 @@
 import torch
 
 
+def project(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Apply one of the checkpoint's bias-free linear layers.
+    """
+    return x @ weight.T
+
+
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Root-mean-square normalization over the last dimension.
 

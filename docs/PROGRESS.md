@@ -10,16 +10,19 @@ continue from "Next action".
 
 ## Next action
 
-**Step 5: `mlp`.** Not started; theory not yet delivered. SwiGLU over
-`gate_proj` / `up_proj` / `down_proj`, intermediate_size 3072, no biases. Much
-smaller than step 4 -- no heads, no positions, no mask. Oracle is
-`hf_model.model.layers[0].mlp`, callable directly like `self_attn` was.
+**Step 6: `block`.** Not started; theory not yet delivered. The two components
+now exist and are both exact against the oracle, so step 6 is pure wiring:
+`input_layernorm` -> attention -> residual add -> `post_attention_layernorm` ->
+mlp -> residual add. Oracle is `hf_model.model.layers[0]`, the whole
+`Qwen3DecoderLayer`, which takes the same `position_embeddings=(cos, sin)`
+argument `self_attn` did -- **check its return type before writing the spec**,
+`self_attn` returned a tuple and `mlp` returned a bare tensor.
 
-Deliver the theory first, then agree the design, then Eviatar implements. Note
-the working agreement changed during step 4 -- see `CLAUDE.md`: Claude may now
-write test code, but only after Eviatar names the units and what to assert.
+Per step 4's lesson, expect this step's bugs to be *wiring* bugs -- the two
+norms swapped, a residual dropped, the pre-norm applied to the wrong branch --
+which unit tests cannot catch by construction. Plan the tests accordingly.
 
----
+Deliver the theory first, then agree the design, then Eviatar implements.
 
 ## Step status
 
@@ -30,8 +33,8 @@ write test code, but only after Eviatar names the units and what to assert.
 | 2 | `rms_norm` | **done** | `tests/test_rmsnorm.py`, 6 tests |
 | 3 | `rope` | **done** | `tests/test_rope.py`, 6 tests |
 | 4 | `attention` | **done** | `tests/test_attention.py`, 51 tests |
-| 5 | `mlp` | next | — |
-| 6 | `block` | not started | — |
+| 5 | `mlp` | **done** | `tests/test_mlp.py`, 4 tests |
+| 6 | `block` | next | — |
 | 7 | full model | not started | — |
 | 8 | greedy generation | not started | — |
 | 9 | KV cache | not started | — |
@@ -106,11 +109,72 @@ Two lessons recorded from it:
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
 
+## Step 5: design decisions
+
+- `mlp(x, w, layer) -> y` in `tiny/mlp.py`. **No `config` parameter**, unlike
+  `attention` -- every shape falls out of the weight matrices and nothing in
+  `Config` is read. A deliberate departure from the `f(x, weights, config)`
+  convention in `CLAUDE.md`: a parameter that is never read is a false claim.
+- `project` moved from `attention.py` down into `layers.py`. It is a generic
+  primitive, not attention-specific, and `attention.py` already imports
+  `layers.py`, so leaving it put would have made `mlp` depend on `attention`.
+- One helper, `swiglu(gate, up)` = `silu(gate) * up`. Everything subtle lives
+  there and is testable on hand-computed numbers with no weights and no model.
+  `silu` itself stays inlined: the interesting mutation (activation applied to
+  `up` instead of `gate`) is only visible one level up.
+- The file layout now reads `layers.py` = primitives, `attention.py` / `mlp.py`
+  = components, and step 6's `model.py` calls both. `CLAUDE.md` updated to match.
+
+## Step 5 mutation matrix
+
+Seven mutations, none survived. Four tests.
+
+| mutation | caught by |
+|---|---|
+| `silu` -> `relu` | `swiglu_matches_hand_computed_values`, both parity |
+| `silu` -> `sigmoid` (plain GLU) | `swiglu_matches_hand_computed_values`, both parity |
+| no activation (`gate * up`) | `swiglu_matches_hand_computed_values`, both parity |
+| gate/up swapped at the call site | parity only -- wiring, as predicted |
+| `layer` ignored, always block 0 | `matches_hf[27]` **only** |
+| elementwise `*` -> `@` | all four, three as `RuntimeError` |
+| positions mixed (`up.mean(dim=1)`) | `is_position_wise`, both parity |
+
+Readings:
+
+- **`matches_hf[27]` is load-bearing alone.** Parametrizing parity over two
+  layers cost one line and is the only thing that catches a hardcoded prefix.
+- **`is_position_wise` catches nothing parity misses**, because parity is total.
+  It earns its place by localizing (it fails on the property, naming the cause,
+  rather than as a tensor diff) and by stating the property in the file.
+- The whole suite is 4 tests where attention needed 51, and the reason is
+  measurable rather than a matter of taste: all three MLP matrices are
+  rectangular, so the failure mode that dominated step 4 -- right shape, wrong
+  numbers -- cannot occur here. Every shape mistake raises.
+- One test vector does nearly all the work: `gate = [1, -1, 0]` against
+  `up = [2, -2, 2]` separates five different wrong activations. The negative and
+  the zero entries are what make it strong; on all-positive inputs `relu`,
+  `sigmoid` and no-activation-at-all are indistinguishable from the truth.
+
+
 ## Gotchas
 
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **The checkpoint stores `lm_head.weight` *and* `model.embed_tokens.weight`, and
+  `torch.equal` on the two is True.** Tied embeddings are a literal duplicate copy
+  here despite `tie_word_embeddings: true`. Summing the file gives 751.6M
+  parameters; the model is 596.0M. Step 7 must not double-count, and can read
+  either key.
+- **The MLP is position-wise mathematically, but not bit-for-bit.** One token
+  alone vs. the same token inside a 5-token batch differs by 5.96e-6 -- the matmul
+  kernel picks a different reduction order for a different-shaped input. A
+  *permutation* of the sequence keeps the shape and is exactly 0.0. When asserting
+  an invariance, prefer the spelling that leaves the shape alone.
+- **Calling HF's own kernel makes parity exactly 0.0, and that is a coincidence,
+  not a property.** `F.silu` is the same call `Qwen3MLP` makes, so the MLP matches
+  at 0.0; hand-writing `gate * sigmoid(gate)` gives 7.2e-7. Never assert `== 0.0`
+  on parity -- it encodes which kernel was called, not correctness.
 - **`k_proj` and `v_proj` are square (1024x1024), so a missing `.T` is silent.**
   Weights are stored `(out, in)`, so a projection is `x @ W.T`. Measured across all
   four: `q_proj` (2048,1024) and `o_proj` (1024,2048) *raise* on `x @ W`, but
@@ -338,6 +402,22 @@ Three lessons recorded, the first two new:
 The long-form version is in `docs/04-attention.md` under "Decomposition and
 testability".
 
+## Rule change (2026-09-23): the no-black-box line moved
+
+`CLAUDE.md`'s hard rule banned `torch.nn` wholesale, which made `F.silu` illegal
+while `torch.softmax` and `torch.rsqrt` were explicitly allowed -- three objects of
+the same kind, split by which namespace PyTorch files them under. Eviatar
+challenged it; the challenge was right.
+
+The rule now bans what hides a **decision**: weights, a reduction axis, an `eps`, a
+mask, a head layout. `F.silu` has none of those and is allowed by name. Everything
+that mattered -- `nn.Linear`, `nn.LayerNorm`, `F.scaled_dot_product_attention` --
+still fails the new test, each for several reasons at once.
+
+Recorded because the general lesson outlives the specific call: a proxy rule
+(namespace) stood in for the real one (hidden decisions), and the proxy misfired on
+the first case that distinguished them.
+
 ## Working agreement change (2026-09-19)
 
 Recorded in `CLAUDE.md`. Claude may now write unit **test** code, but only once
@@ -352,7 +432,12 @@ not produced under the current agreement.
 
 ## Open questions
 
-- (none open for step 5)
+- `docs/05-mlp.md` was never written -- step 5 went theory -> design -> implement
+  with beat 3 skipped. The theory, the worked SwiGLU example and the mutation
+  matrix are in the session, not in the repo.
+- `tests/test_attention.py` imports `project` from `tiny.attention`, which now
+  only re-exports it from `tiny.layers`. Harmless today, breaks the moment
+  `attention` stops needing it.
 
 ## Design decisions (step 1)
 

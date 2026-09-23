@@ -1,18 +1,8 @@
 import torch
 
 from tiny.config import Config
-from tiny.layers import apply_rope, rms_norm
+from tiny.layers import apply_rope, rms_norm, project
 from tiny.weights import layer_prefix
-
-
-def project(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Apply one of the checkpoint's bias-free linear layers.
-
-    Weights are stored (out_features, in_features), so the matmul needs the
-    transpose. k_proj and v_proj are square, so omitting it there yields the
-    right shape and wrong numbers rather than an error.
-    """
-    return x @ weight.T
 
 
 def split_heads(x: torch.Tensor, heads: int, head_dim: int) -> torch.Tensor:
