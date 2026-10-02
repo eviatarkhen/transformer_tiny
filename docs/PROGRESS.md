@@ -515,8 +515,9 @@ not produced under the current agreement.
 
 ## Open questions
 
-- `docs/05-mlp.md` and `docs/06-block.md` were never written -- beat 3 was
-  skipped in both steps. The theory, the worked SwiGLU example and the mutation
+- `docs/05-mlp.md` was never written -- beat 3 was skipped in step 5.
+  `docs/06-block.md` exists (2026-10-02) and covers the sdpa-vs-eager testing
+  findings. The theory, the worked SwiGLU example and the mutation
   matrix are in the session, not in the repo.
 - `tests/test_attention.py` imports `project` from `tiny.attention`, which now
   only re-exports it from `tiny.layers`. Harmless today, breaks the moment
