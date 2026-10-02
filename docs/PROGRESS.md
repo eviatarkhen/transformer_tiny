@@ -10,17 +10,20 @@ continue from "Next action".
 
 ## Next action
 
-**Step 6: `block`.** Not started; theory not yet delivered. The two components
-now exist and are both exact against the oracle, so step 6 is pure wiring:
-`input_layernorm` -> attention -> residual add -> `post_attention_layernorm` ->
-mlp -> residual add. Oracle is `hf_model.model.layers[0]`, the whole
-`Qwen3DecoderLayer`, which takes the same `position_embeddings=(cos, sin)`
-argument `self_attn` did -- **check its return type before writing the spec**,
-`self_attn` returned a tuple and `mlp` returned a bare tensor.
+**Step 7: full model.** Not started; theory not yet delivered. Token ids ->
+embedding lookup -> 28 blocks -> final norm (`model.norm`) -> LM head -> logits
+(batch, seq, 151936). Everything per-block exists and is exact; step 7 adds the
+embedding, the final norm, the LM head, and building `cos`/`sin` **once** for all
+28 layers.
 
-Per step 4's lesson, expect this step's bugs to be *wiring* bugs -- the two
-norms swapped, a residual dropped, the pre-norm applied to the wrong branch --
-which unit tests cannot catch by construction. Plan the tests accordingly.
+Facts already measured that step 7 needs:
+- the LM head is tied: `lm_head.weight` and `model.embed_tokens.weight` are both
+  in the file and `torch.equal` (see Gotchas);
+- `hidden_states[i]` is the input to layer i for i in 0..27, but
+  `hidden_states[28]` is **after** the final norm, not layer 27's raw output;
+- oracle for the whole thing is `hf_model(ids).logits`. Check its tolerance on
+  real logits before writing the spec -- logits are large, and step 6 showed
+  absolute 1e-4 does not survive amplification on out-of-distribution input.
 
 Deliver the theory first, then agree the design, then Eviatar implements.
 
@@ -34,8 +37,8 @@ Deliver the theory first, then agree the design, then Eviatar implements.
 | 3 | `rope` | **done** | `tests/test_rope.py`, 6 tests |
 | 4 | `attention` | **done** | `tests/test_attention.py`, 51 tests |
 | 5 | `mlp` | **done** | `tests/test_mlp.py`, 4 tests |
-| 6 | `block` | next | — |
-| 7 | full model | not started | — |
+| 6 | `block` | **done** | `tests/test_block.py`, 7 tests |
+| 7 | full model | next | — |
 | 8 | greedy generation | not started | — |
 | 9 | KV cache | not started | — |
 | 10 | optimize | not started | — |
@@ -109,6 +112,64 @@ Two lessons recorded from it:
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
 
+## Step 6: who wrote it
+
+`tiny/model.py` and `tests/test_block.py` were written by **Claude**, at Eviatar's
+explicit authorization for this step only (2026-09-30), and reviewed by him before
+commit. Beat 2 was skipped as part of that. This is a one-step exception, not a
+change to the standing rule in `CLAUDE.md`.
+
+## Step 6: design decisions
+
+- `block(x, w, config, layer, cos, sin) -> y` in `tiny/model.py`. Takes `config`
+  (unlike `mlp`) because it reads `rms_norm_eps` and forwards to `attention`.
+- **The flow is written out plainly**, four lines that mirror HF's forward:
+  normalize a copy, run the sublayer, add back; twice.
+- A helper `pre_norm_residual(x, norm_weight, eps, sublayer)` was tried first and
+  **rejected by Eviatar on readability**: passing attention and mlp in as lambdas
+  hid the flow in the one function people read to understand the architecture.
+  The trade, measured: the helper let four bugs (residual dropped, post-norm,
+  norm on the sublayer's output, no norm) be caught by toy-sublayer unit tests
+  with no model. Without it, all four still fail **all seven** parity tests --
+  detection unchanged, only localization lost. Inside a block, norm and residual
+  placement *is* the wiring, and wiring is what parity is for. Recorded because
+  it is the first case where testability-follows-decomposition lost to
+  readability, and correctly so.
+
+## Step 6 oracle facts (measured)
+
+- `hf_model.model.layers[i](x, position_embeddings=(cos, sin), attention_mask=None)`
+  returns a **bare tensor** in v5. `self_attn` returns a tuple, `mlp` a bare
+  tensor: three siblings, two conventions.
+- The residual branches are corrections, not replacements: on layer 0, attention
+  and mlp each contribute ~19% of the stream's norm.
+- **Massive activations**: the stream's norm goes 1.8 (embedding) -> 20.4 -> 28.8
+  -> 6592.5 at layer 3 and stays there. At layer 10 the largest value is 6529.2
+  and the median magnitude 0.541; channels 35, 13, 1, 277 hold 99.8% of the
+  squared magnitude. `input_layernorm` brings the max back to 17.1. This is why
+  each branch needs its own pre-norm.
+
+## Step 6 mutation matrix
+
+Nine mutations, none survived. Seven tests: parity on the real stream at layers
+0/1/13/27, parity on random input at layer 0 over three shapes.
+
+| mutation | caught by |
+|---|---|
+| residual dropped | all seven parity |
+| post-norm | all seven parity |
+| norm on the sublayer's output | all seven parity |
+| no norm | all seven parity |
+| the two norms swapped | all seven parity |
+| mlp half reuses `input_layernorm` | all seven parity |
+| mlp half fed the pre-attention stream | all seven parity |
+| norm weights always from layer 0 | real-stream parity at 1/13/27 **only** |
+| mlp always reads layer 0 | real-stream parity at 1/13/27 **only** |
+
+As in step 5, sweeping parity over more than one layer is what catches a
+hardcoded layer index; nothing else can.
+
+
 ## Step 5: design decisions
 
 - `mlp(x, w, layer) -> y` in `tiny/mlp.py`. **No `config` parameter**, unlike
@@ -161,6 +222,17 @@ Readings:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **Absolute 1e-4 parity fails on deep layers fed random input, with no bug.**
+  Block parity at layer 27 on `randn` was 1.1e-3. Localized stage by stage: our
+  mlp given HF's exact input is 0.0; attention's ~2.5e-5 sdpa-vs-matmul drift is
+  amplified ~40x by layer 27's `post_attention_layernorm` weight (max **192**) and
+  an mlp output reaching ~1900. On the real stream layer 27 actually receives,
+  the same comparison is 3e-5. Deep layers are only well-conditioned in
+  distribution: feed them real hidden states, not noise.
+- **`hidden_states` has 29 entries and the last one is post-final-norm.**
+  `layers[i](hidden_states[i]) == hidden_states[i+1]` exactly for i in 0..26, but
+  `hidden_states[28]` is `model.norm(layers[27](...))`. Easy to mistake for the
+  last block's output.
 - **The checkpoint stores `lm_head.weight` *and* `model.embed_tokens.weight`, and
   `torch.equal` on the two is True.** Tied embeddings are a literal duplicate copy
   here despite `tie_word_embeddings: true`. Summing the file gives 751.6M
@@ -432,8 +504,8 @@ not produced under the current agreement.
 
 ## Open questions
 
-- `docs/05-mlp.md` was never written -- step 5 went theory -> design -> implement
-  with beat 3 skipped. The theory, the worked SwiGLU example and the mutation
+- `docs/05-mlp.md` and `docs/06-block.md` were never written -- beat 3 was
+  skipped in both steps. The theory, the worked SwiGLU example and the mutation
   matrix are in the session, not in the repo.
 - `tests/test_attention.py` imports `project` from `tiny.attention`, which now
   only re-exports it from `tiny.layers`. Harmless today, breaks the moment
