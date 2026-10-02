@@ -229,6 +229,17 @@ The highest-value section in this file — these are exactly what gets lost.
   an mlp output reaching ~1900. On the real stream layer 27 actually receives,
   the same comparison is 3e-5. Deep layers are only well-conditioned in
   distribution: feed them real hidden states, not noise.
+  **Proven to be kernel arithmetic, not a bug:** against HF's *eager* attention
+  (the same matmul-softmax-matmul we wrote) with an explicit causal mask, the
+  block is **exactly 0.0** -- random input at layer 27, every one of the 28
+  layers alone on the real stream, and all 28 chained end to end. The sdpa
+  numbers for the same cases are 1.2e-3, 3.0e-5 and 4.4e-4 (3e-7 relative). The
+  whole diff is sdpa summing in a different order, amplified by large weights.
+- **Under `eager`, `attention_mask=None` is NOT causal.** Measured at layer 0:
+  `mask=None` vs an explicit causal mask differ by 0.49, and changing the last
+  token moves position 0's output by 0.088. Under sdpa, `None` means causal.
+  Same argument, opposite meaning, depending on a config string. Any test that
+  uses eager must pass `torch.full((seq, seq), -inf).triu(1)[None, None]`.
 - **`hidden_states` has 29 entries and the last one is post-final-norm.**
   `layers[i](hidden_states[i]) == hidden_states[i+1]` exactly for i in 0..26, but
   `hidden_states[28]` is `model.norm(layers[27](...))`. Easy to mistake for the
@@ -407,9 +418,9 @@ with torch.no_grad():
   mask (max diff 0.0), and both are genuinely causal**: changing only the last token
   leaves every earlier position's output bit-identical. So the oracle is causal
   whether or not a mask is passed, and our implementation must be causal to match it.
-- Not measured: whether `attention_mask=None` is also causal under the `eager`
-  implementation. Do not assume it is. If the test ever switches implementation,
-  re-check.
+- ~~Not measured~~ **Measured 2026-10-02: under `eager`, `attention_mask=None` is
+  NOT causal** (diff 0.49 vs an explicit mask; see Gotchas). Our implementation
+  matches eager-with-causal-mask exactly, 0.0, through all 28 layers.
 
 ## Step 4: design decisions
 
