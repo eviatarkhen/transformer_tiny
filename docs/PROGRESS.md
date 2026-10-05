@@ -10,23 +10,26 @@ continue from "Next action".
 
 ## Next action
 
-**Step 8: greedy generation.** Not started; theory delivered 2026-10-05. A loop
-around `forward`: run the sequence, take the last row of logits, pick the
-argmax, append it, repeat. Lives in `tiny/generate.py`.
+**Step 9: KV cache.** Not started; theory not yet delivered. Greedy generation
+reruns the whole sequence every step to read one row: 30 new tokens from a
+5-token prompt push 585 token-positions through the model. The cache keeps
+each layer's keys and values so every step processes only the new token.
 
-Facts already measured for it:
-- **HF's `generate()` samples by default.** `generation_config.json` sets
-  `do_sample: true`, temperature 0.6, top_k 20, top_p 0.95. The greedy oracle
-  needs `do_sample=False` explicitly (as `scripts/smoke.py` already does).
-  Without it the default run gave `' Paris, and the capital of Italy is Rome.'`.
-- Two stop tokens: `eos_token_id` is `[151645, 151643]` = `<|im_end|>`,
-  `<|endoftext|>`. `config.json` lists only 151645.
-- A scratch greedy loop over `forward` reproduced HF's 30 greedy tokens
-  **id for id**. The smallest top-1 vs top-2 logit gap over those 30 steps was
-  0.024 (step 6) -- 200x the sdpa drift, so the default oracle is safe for
-  argmax comparisons on this prompt.
+Where the plumbing already stands, by design since step 3:
+- `positions` is a tensor at every level (`rope_cos_sin`, `run_blocks`,
+  `forward`), so the new token can be passed as `tensor([n])`.
+- `attend` builds a **square** causal mask from `q.shape[-2]`. With a cache,
+  q has length 1 and k is long. Its docstring already flags this as the line
+  step 9 must revisit.
+- `greedy` rebuilds `torch.arange(ids.shape[1])` every turn -- the other line
+  that changes.
 
-Deliver the theory, agree the design, then Eviatar implements.
+Speed baseline to beat (no cache, CPU, float32, best of 3):
+**15.9 tok/s for 10 new tokens, 14.3 tok/s for 30** -- slowing as the sequence
+grows, which is the cost the cache removes. HF with its own cache measured
+21-30 tok/s at step 0.
+
+Deliver the theory first, then agree the design, then Eviatar implements.
 
 ## Step status
 
@@ -40,8 +43,8 @@ Deliver the theory, agree the design, then Eviatar implements.
 | 5 | `mlp` | **done** | `tests/test_mlp.py`, 4 tests |
 | 6 | `block` | **done** | `tests/test_block.py`, 7 tests |
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
-| 8 | greedy generation | next | — |
-| 9 | KV cache | not started | — |
+| 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
+| 9 | KV cache | next | — |
 | 10 | optimize | not started | — |
 | 11 | sampling | not started | — |
 
@@ -112,6 +115,49 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 8: greedy generation
+
+**Written by Claude** at Eviatar's explicit request, tests chosen by Claude at
+his request (as for `lm_head` and `forward`). Theory delivered; beat 2 skipped.
+
+Design, in `tiny/generate.py`:
+
+- `greedy(ids, w, config, max_new_tokens, stop_ids=()) -> ids`. Returns the
+  **whole sequence**, prompt then new tokens, the same contract as HF's
+  `generate`, so the two compare directly.
+- **Stop ids come from the caller**, not `Config`. `config.json` lists one stop
+  token (151645); `generation_config.json` lists two (151645, 151643). Reading
+  them from `Config` would silently miss one. A stop token is **kept** in the
+  output, as HF does.
+- **One prompt only**, enforced with `ValueError`. Batched prompts finish at
+  different times and need padding -- out of scope.
+- Positions are `arange(ids.shape[1])` every turn: correct without a cache,
+  the line step 9 replaces.
+
+Verified: 20 tokens on the plain prompt and a 4-token chat answer
+(`'HELLO!<|im_end|>'`, stopped on 151645) both identical to HF's
+`generate(do_sample=False)`, id for id.
+
+Tests use the **default sdpa** oracle, not eager: generation compares argmax
+choices, which flip only if two logits are within ~1e-4, and the closest
+top-two gap over 30 steps on the prompt measured 0.024. If a future prompt has
+a near-tie, switch to `hf_model_eager`.
+
+### Step 8 mutation matrix
+
+| mutation | `matches_hf_generate` | `stops_at_a_stop_token` |
+|---|---|---|
+| reads the first row of logits | caught | caught |
+| argmin instead of argmax | caught | caught |
+| loop one token short | **only this** | -- |
+| stop ids ignored | -- | **only this** |
+| stop checked before appending (token dropped) | -- | **only this** |
+| positions stop advancing after the prompt | caught | caught |
+
+Each test owns its concern. The positions mutation was artificial (clamped);
+the realistic version only exists once there is a cache.
+
 
 ## Step 7: who wrote what
 
