@@ -10,22 +10,23 @@ continue from "Next action".
 
 ## Next action
 
-**Step 7: full model.** Not started; theory not yet delivered. Token ids ->
-embedding lookup -> 28 blocks -> final norm (`model.norm`) -> LM head -> logits
-(batch, seq, 151936). Everything per-block exists and is exact; step 7 adds the
-embedding, the final norm, the LM head, and building `cos`/`sin` **once** for all
-28 layers.
+**Step 8: greedy generation.** Not started; theory delivered 2026-10-05. A loop
+around `forward`: run the sequence, take the last row of logits, pick the
+argmax, append it, repeat. Lives in `tiny/generate.py`.
 
-Facts already measured that step 7 needs:
-- the LM head is tied: `lm_head.weight` and `model.embed_tokens.weight` are both
-  in the file and `torch.equal` (see Gotchas);
-- `hidden_states[i]` is the input to layer i for i in 0..27, but
-  `hidden_states[28]` is **after** the final norm, not layer 27's raw output;
-- oracle for the whole thing is `hf_model(ids).logits`. Check its tolerance on
-  real logits before writing the spec -- logits are large, and step 6 showed
-  absolute 1e-4 does not survive amplification on out-of-distribution input.
+Facts already measured for it:
+- **HF's `generate()` samples by default.** `generation_config.json` sets
+  `do_sample: true`, temperature 0.6, top_k 20, top_p 0.95. The greedy oracle
+  needs `do_sample=False` explicitly (as `scripts/smoke.py` already does).
+  Without it the default run gave `' Paris, and the capital of Italy is Rome.'`.
+- Two stop tokens: `eos_token_id` is `[151645, 151643]` = `<|im_end|>`,
+  `<|endoftext|>`. `config.json` lists only 151645.
+- A scratch greedy loop over `forward` reproduced HF's 30 greedy tokens
+  **id for id**. The smallest top-1 vs top-2 logit gap over those 30 steps was
+  0.024 (step 6) -- 200x the sdpa drift, so the default oracle is safe for
+  argmax comparisons on this prompt.
 
-Deliver the theory first, then agree the design, then Eviatar implements.
+Deliver the theory, agree the design, then Eviatar implements.
 
 ## Step status
 
@@ -38,8 +39,8 @@ Deliver the theory first, then agree the design, then Eviatar implements.
 | 4 | `attention` | **done** | `tests/test_attention.py`, 51 tests |
 | 5 | `mlp` | **done** | `tests/test_mlp.py`, 4 tests |
 | 6 | `block` | **done** | `tests/test_block.py`, 7 tests |
-| 7 | full model | next | — |
-| 8 | greedy generation | not started | — |
+| 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
+| 8 | greedy generation | next | — |
 | 9 | KV cache | not started | — |
 | 10 | optimize | not started | — |
 | 11 | sampling | not started | — |
@@ -111,6 +112,89 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 7: who wrote what
+
+Split into five pieces at Eviatar's request, guided one at a time.
+
+| piece | implementation | tests |
+|---|---|---|
+| `embed` | Eviatar | his plan, Claude wrote it |
+| `run_blocks` | Eviatar (two bugs found in review: no `return`, 26 of 28 blocks) | Claude chose, at his request |
+| `final_norm` | Eviatar | Claude chose, at his request |
+| `lm_head` | **Claude**, at his explicit request | Claude chose, at his request |
+| `forward` | **Claude**, at his explicit request | Claude chose, at his request |
+
+The `CLAUDE.md` rule is unchanged; these are per-piece exceptions he made.
+
+## Step 7: design decisions
+
+- Five functions in `tiny/model.py`: `embed`, `run_blocks`, `final_norm`,
+  `lm_head`, and `forward`, which is four lines reading in pipeline order.
+- `run_blocks` and `forward` take **`positions`**, required, no `arange`
+  default. Step 4's decision carried to the top: a default would reintroduce
+  the bug the positions tests exist to catch.
+- `cos`/`sin` built **once** in `run_blocks`, shared by all 28 blocks.
+- `lm_head` reads **`model.embed_tokens.weight`**, not the duplicate
+  `lm_head.weight`: it states the model is tied, and survives tied checkpoints
+  that omit the duplicate. No branch on `tie_word_embeddings` -- it would be
+  dead, untested code here.
+- `lm_head` returns logits for **every** position; slicing to the last row is
+  the caller's job.
+- `final_norm` kept as its own function; in `forward` it reads fine.
+
+## Step 7: testing decisions
+
+- **`embed` asserts exact equality** (`torch.equal`), departing from the 1e-4
+  convention on purpose: a lookup does no arithmetic, so there is nothing to
+  tolerate.
+- **Whole-stack tests use HF's eager path** via the `hf_model_eager` fixture in
+  `conftest.py`, which toggles the shared model with `set_attn_implementation`
+  and restores it. Against eager, `forward` is **0.0** on every logit. Against
+  the default sdpa it is 6.0e-5 on the prompt and **1.1e-4 on random (2, 7)
+  ids -- past the tolerance with no bug present.** The restore was verified by
+  running `test_run_blocks` before `test_block` (which relies on sdpa's
+  causal `mask=None`): 60 passed.
+- HF's stack output (before the final norm) is captured with a **forward hook**
+  on `hf_model.model.layers[-1]`; `hidden_states` cannot supply it.
+- HF accepts custom `position_ids`, so the positions tests are true parity at
+  gapped positions (0, 3, 6, ...), not just "the output changes".
+- Random token ids are realistic input for every piece here, because they go
+  through `embed` first.
+
+## Step 7 mutation matrices
+
+`embed`: transposed table (IndexError), ids off by one, batch/seq swapped
+(shape), ids ignored, first sentence only -- all caught. `lm_head.weight` key
+passes: an **equivalent mutant**, identical tables in this file.
+
+`run_blocks`: 26 blocks, reversed order, always layer 0, stream not threaded
+-- caught by both tests. Positions rebuilt internally -- caught **only** by
+the non-default-positions test. cos/sin rebuilt inside the loop passes: an
+equivalent mutant (28x slower, same answer).
+
+`final_norm`: no norm, wrong key, weight ignored -- caught at both scales. eps
+hardcoded 1e-5, eps dropped -- caught **only** at input scale 1e-3.
+
+`lm_head`: transpose forgotten (raises), last position only, softmax applied,
+1/sqrt(hidden) scaling -- caught by both. `lm_head.weight` key -- caught
+**only** by the tied-table test, which drops that key. The same code change
+that was an equivalent mutant in `embed` is a regression here, because the
+docstring promised it.
+
+`forward`: final norm skipped, norm before the blocks, last position only,
+block output discarded -- caught by both. Positions rebuilt -- caught **only**
+by the non-default-positions test.
+
+Lessons recorded:
+
+- **"Predicts Paris" is a useless test.** Running 26 of 28 blocks moved the
+  stream by 5,110 and still predicted `' Paris'`; applying softmax keeps the
+  argmax. Only numeric parity catches either.
+- **Equivalent mutants are a category, not a hole.** Different code, same
+  answer for every input. Note them and move on -- unless a test describes a
+  context where they differ, as the tied-table test does.
+
 
 ## Step 6: who wrote it
 
@@ -222,6 +306,14 @@ Readings:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **HF's `generate()` samples unless told not to.** The checkpoint's
+  `generation_config.json` sets `do_sample: true`. A greedy oracle must pass
+  `do_sample=False`.
+- **A uniform position shift is exact in theory, approximate after 28 blocks.**
+  The step 4 gotcha below measured 0..4 vs 100..104 as byte-identical at the
+  attention level. Through the whole stack, 0..6 vs 100..106 differ by 1.7e-3:
+  float32 noise in the larger rotation angles, amplified by depth. Still
+  negligible next to a real change of gaps (133).
 - **Absolute 1e-4 parity fails on deep layers fed random input, with no bug.**
   Block parity at layer 27 on `randn` was 1.1e-3. Localized stage by stage: our
   mlp given HF's exact input is 0.0; attention's ~2.5e-5 sdpa-vs-matmul drift is

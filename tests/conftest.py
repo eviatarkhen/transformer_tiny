@@ -43,3 +43,23 @@ def hf_model():
 @pytest.fixture(scope="session")
 def hf_tokenizer():
     return AutoTokenizer.from_pretrained(MODEL_ID)
+
+
+@pytest.fixture
+def hf_model_eager(hf_model):
+    """The same HF model, switched to the eager attention path for one test.
+
+    Eager is plain matmul -> softmax -> matmul, the same arithmetic tiny/ does,
+    so whole-stack comparisons against it are exact (0.0). The default sdpa
+    kernel sums in a different order, and over 28 chained blocks that drifts
+    to ~1e-3 -- past the 1e-4 tolerance with no bug present.
+
+    Restored to the original implementation afterwards, because hf_model is
+    session-scoped and every other test expects the default.
+    """
+    original = hf_model.config._attn_implementation
+    hf_model.set_attn_implementation("eager")
+    try:
+        yield hf_model
+    finally:
+        hf_model.set_attn_implementation(original)
