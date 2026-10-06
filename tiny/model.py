@@ -2,7 +2,7 @@ import torch
 
 from tiny.attention import attention
 from tiny.config import Config
-from tiny.layers import project, rms_norm, rope_cos_sin
+from tiny.layers import project, rms_norm
 from tiny.mlp import mlp
 from tiny.weights import layer_prefix
 
@@ -12,8 +12,7 @@ def block(
     w: dict[str, torch.Tensor],
     config: Config,
     layer: int,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    positions: torch.Tensor,
 ) -> torch.Tensor:
     """One decoder block: an attention half, then an MLP half.
 
@@ -22,7 +21,7 @@ def block(
         w: the full weight dict, keyed exactly as the checkpoint is.
         config: architecture.
         layer: which block's weights to read.
-        cos, sin: (seq, head_dim) rotation tables, forwarded to attention.
+        positions: (seq,) integer positions, forwarded to attention.
 
     Returns:
         (batch, seq, hidden_size), the same shape as x.
@@ -36,7 +35,7 @@ def block(
     eps = config.rms_norm_eps
 
     normed = rms_norm(x, w[p + "input_layernorm.weight"], eps)
-    x = x + attention(normed, w, config, layer, cos, sin)
+    x = x + attention(normed, w, config, layer, positions)
 
     normed = rms_norm(x, w[p + "post_attention_layernorm.weight"], eps)
     return x + mlp(normed, w, layer)
@@ -77,9 +76,8 @@ def run_blocks(
     Returns:
        (batch, seq, hidden_size) residual state
     """
-    cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
     for layer in range(config.num_hidden_layers):
-        x = block(x, w, config, layer, cos, sin)
+        x = block(x, w, config, layer, positions)
 
     return x
 

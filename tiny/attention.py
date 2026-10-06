@@ -1,7 +1,7 @@
 import torch
 
 from tiny.config import Config
-from tiny.layers import apply_rope, rms_norm, project
+from tiny.layers import apply_rope, rms_norm, project, rope_cos_sin
 from tiny.weights import layer_prefix
 
 
@@ -69,8 +69,7 @@ def attention(
     w: dict[str, torch.Tensor],
     config: Config,
     layer: int,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    positions: torch.Tensor,
 ) -> torch.Tensor:
     """Grouped-query causal self-attention for one block.
 
@@ -79,10 +78,11 @@ def attention(
         w: the full weight dict, keyed exactly as the checkpoint is.
         config: architecture; every shape below is derived from it.
         layer: which block's weights to read.
-        cos, sin: (seq, head_dim) rotation tables from rope_cos_sin. Passed in
-            rather than built here because all 28 layers share one table, and
-            because once a KV cache exists only the caller knows the true
-            positions -- seq=1 can mean position 100.
+        positions: (seq,) integer position of each token in x. Passed in
+            because once a KV cache exists only the caller knows them --
+            seq=1 can mean position 100. The rotation tables are built from
+            them here: they are this function's detail, and recomputing a
+            (seq, head_dim) table per layer is noise next to the matmuls.
 
     Returns:
         (batch, seq, hidden_size), the same shape as x.
@@ -98,6 +98,7 @@ def attention(
     q = rms_norm(q, w[p + "q_norm.weight"], config.rms_norm_eps)
     k = rms_norm(k, w[p + "k_norm.weight"], config.rms_norm_eps)
 
+    cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
     q = apply_rope(q, cos, sin)
     k = apply_rope(k, cos, sin)
 

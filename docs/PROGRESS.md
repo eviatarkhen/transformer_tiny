@@ -16,8 +16,9 @@ reruns the whole sequence every step to read one row: 30 new tokens from a
 each layer's keys and values so every step processes only the new token.
 
 Where the plumbing already stands, by design since step 3:
-- `positions` is a tensor at every level (`rope_cos_sin`, `run_blocks`,
-  `forward`), so the new token can be passed as `tensor([n])`.
+- `positions` is a tensor at every level (`rope_cos_sin`, `attention`,
+  `block`, `run_blocks`, `forward`), so the new token can be passed as
+  `tensor([n])`. `attention` already receives it, which the mask will need.
 - `attend` builds a **square** causal mask from `q.shape[-2]`. With a cache,
   q has length 1 and k is long. Its docstring already flags this as the line
   step 9 must revisit.
@@ -181,6 +182,14 @@ The `CLAUDE.md` rule is unchanged; these are per-piece exceptions he made.
   default. Step 4's decision carried to the top: a default would reintroduce
   the bug the positions tests exist to catch.
 - `cos`/`sin` built **once** in `run_blocks`, shared by all 28 blocks.
+  **Superseded 2026-10-06** (after step 8, on Eviatar's objection that the
+  tables were built far above their only user): `block` and `attention` now
+  take `positions`, and `attention` builds its own tables. `positions` is the
+  real dependency; cos/sin are attention's detail, and rebuilding a
+  (seq, head_dim) table per layer costs nothing next to the matmuls. Step 7's
+  "rebuilt inside the loop" equivalent mutant is now the actual design. The
+  attention test `test_uses_the_cos_sin_arguments` became
+  `test_uses_the_positions_argument`, same assertion.
 - `lm_head` reads **`model.embed_tokens.weight`**, not the duplicate
   `lm_head.weight`: it states the model is tied, and survives tied checkpoints
   that omit the duplicate. No branch on `tie_word_embeddings` -- it would be
@@ -251,7 +260,8 @@ change to the standing rule in `CLAUDE.md`.
 
 ## Step 6: design decisions
 
-- `block(x, w, config, layer, cos, sin) -> y` in `tiny/model.py`. Takes `config`
+- `block(x, w, config, layer, cos, sin) -> y` in `tiny/model.py` (now
+  `positions` instead of `cos, sin`; see step 7's superseded note). Takes `config`
   (unlike `mlp`) because it reads `rms_norm_eps` and forwards to `attention`.
 - **The flow is written out plainly**, four lines that mirror HF's forward:
   normalize a copy, run the sublayer, add back; twice.

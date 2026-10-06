@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tiny.layers import rope_cos_sin
 from tiny.model import block
 
 LAYERS = [0, 1, 13, 27]
@@ -9,11 +8,8 @@ SHAPES = [(1, 1), (2, 7), (1, 32)]
 
 
 def run(x, weights, config, layer):
-    """Our block, with the rotation tables built for positions 0..seq-1."""
-    cos, sin = rope_cos_sin(
-        torch.arange(x.shape[1]), config.head_dim, config.rope_theta
-    )
-    return block(x, weights, config, layer, cos, sin)
+    """Our block, at positions 0..seq-1."""
+    return block(x, weights, config, layer, torch.arange(x.shape[1]))
 
 
 def hf_block(x, hf_model, layer):

@@ -15,7 +15,6 @@ from tiny.attention import (
     repeat_kv,
     split_heads,
 )
-from tiny.layers import rope_cos_sin
 from tiny.weights import layer_prefix
 
 LAYERS = [0, 1, 13, 27]
@@ -23,11 +22,8 @@ SHAPES = [(1, 1), (1, 5), (1, 32), (2, 7), (3, 16)]
 
 
 def run(x, weights, config, layer):
-    """Our attention, with the rotation tables built for positions 0..seq-1."""
-    cos, sin = rope_cos_sin(
-        torch.arange(x.shape[1]), config.head_dim, config.rope_theta
-    )
-    return attention(x, weights, config, layer, cos, sin)
+    """Our attention, at positions 0..seq-1."""
+    return attention(x, weights, config, layer, torch.arange(x.shape[1]))
 
 
 def hf_attention(x, hf_model, layer):
@@ -322,8 +318,8 @@ def test_is_causal(config, weights):
     )
 
 
-def test_uses_the_cos_sin_arguments(config, weights):
-    """The rotation tables passed in must actually be used.
+def test_uses_the_positions_argument(config, weights):
+    """The positions passed in must actually be used.
 
     Guards the design decision that positions come from the caller: an
     implementation that rebuilt them internally from arange(seq) would ignore
@@ -338,14 +334,7 @@ def test_uses_the_cos_sin_arguments(config, weights):
     torch.manual_seed(3)
     x = torch.randn(batch, seq, config.hidden_size)
 
-    contiguous = rope_cos_sin(
-        torch.arange(seq), config.head_dim, config.rope_theta
-    )
-    spread = rope_cos_sin(
-        torch.arange(seq) * 3, config.head_dim, config.rope_theta
-    )
-
-    out_contiguous = attention(x, weights, config, 0, *contiguous)
-    out_spread = attention(x, weights, config, 0, *spread)
+    out_contiguous = attention(x, weights, config, 0, torch.arange(seq))
+    out_spread = attention(x, weights, config, 0, torch.arange(seq) * 3)
 
     assert not torch.allclose(out_contiguous, out_spread, atol=1e-4)
