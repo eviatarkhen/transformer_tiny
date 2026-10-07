@@ -10,25 +10,18 @@ continue from "Next action".
 
 ## Next action
 
-**Step 9: KV cache.** Not started; theory not yet delivered. Greedy generation
-reruns the whole sequence every step to read one row: 30 new tokens from a
-5-token prompt push 585 token-positions through the model. The cache keeps
-each layer's keys and values so every step processes only the new token.
+**Step 10: optimize.** Not started, and not yet scoped: the step table names
+it but nothing says what it targets. Start by measuring where the time goes
+in a cached turn, then let Eviatar pick the target. Candidates, unranked:
+the per-turn `torch.cat` in `update_cache` (copies the whole cache every
+token), MPS instead of CPU, bf16 instead of float32 (needs a looser parity
+tolerance), and `torch.compile`.
 
-Where the plumbing already stands, by design since step 3:
-- `positions` is a tensor at every level (`rope_cos_sin`, `attention`,
-  `block`, `run_blocks`, `forward`), so the new token can be passed as
-  `tensor([n])`. `attention` already receives it, which the mask will need.
-- `attend` builds a **square** causal mask from `q.shape[-2]`. With a cache,
-  q has length 1 and k is long. Its docstring already flags this as the line
-  step 9 must revisit.
-- `greedy` rebuilds `torch.arange(ids.shape[1])` every turn -- the other line
-  that changes.
-
-Speed baseline to beat (no cache, CPU, float32, best of 3):
-**15.9 tok/s for 10 new tokens, 14.3 tok/s for 30** -- slowing as the sequence
-grows, which is the cost the cache removes. HF with its own cache measured
-21-30 tok/s at step 0.
+Speed to beat (CPU, float32, best of 3, `"The capital of France is"`):
+**greedy(use_cache=True): 39.8 tok/s at 10 new tokens, 43.1 at 30, 41.9 at
+100.** Without the cache: 16.2 and 14.5. Benchmark with
+`greedy(..., use_cache=False)` vs the default; the scratchpad script from
+step 9 is not kept, so rewrite it -- best of 3, after one warm-up.
 
 Deliver the theory first, then agree the design, then Eviatar implements.
 
@@ -45,8 +38,8 @@ Deliver the theory first, then agree the design, then Eviatar implements.
 | 6 | `block` | **done** | `tests/test_block.py`, 7 tests |
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
-| 9 | KV cache | next | — |
-| 10 | optimize | not started | — |
+| 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
+| 10 | optimize | next | — |
 | 11 | sampling | not started | — |
 
 ## Environment (verified 2026-09-16)
@@ -116,6 +109,66 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 9: KV cache
+
+**Written by Claude** at Eviatar's explicit request, as in steps 6 and 8;
+tests chosen by Claude at his request ("test all and write the tests"). Beat 3
+(notes) skipped at his request. Theory delivered in small pieces; what landed
+was the score grid as a picture (rows = queries, columns = keys), and the
+tamper experiment below, not prose.
+
+Design, agreed beat 2:
+
+- **The cache is plain data**: `cache = [None] * num_hidden_layers`, a slot
+  per layer holding `(k, v)`. Eviatar rejected a `KVCache` class as foreign
+  to a codebase with no classes, and two parallel function families as four
+  duplicated pairs. Mutated **in place**, documented as such.
+- **`update_cache(cache, layer, k_new, v_new) -> (k, v)`** in
+  `tiny/attention.py` holds all the bookkeeping, so it tests on toy tensors.
+- **`cache=None` added to `attention`, `block`, `run_blocks`, `forward`.**
+  None is exactly the old behaviour: no existing call site or test changed.
+- **Stored after RoPE, before `repeat_kv`.** A key's rotation depends only on
+  its own position, so it is final once made; 8 heads instead of 16 halves
+  the memory.
+- **`causal_mask(q_len, k_len=None)`**, diagonal shifted by `k_len - q_len`;
+  `attend` passes both lengths. Not needed for greedy's shapes -- the old
+  square mask worked by broadcasting a (1, 1) zero across the row -- but kept
+  on Eviatar's call: "i dont like luck". It breaks (RuntimeError) the moment
+  more than one new token meets a non-empty cache.
+- **One `greedy`, `use_cache=True` default** (as HF). Eviatar asked for one
+  implementation over a separate `greedy_cached`. The two modes differ in one
+  line: `start`, the first position forward has not seen, advances only with
+  a cache. `use_cache=False` is the benchmark baseline.
+
+Verified: both modes id-for-id equal to each other and to HF's generate
+(10/20/30 tokens, chat prompt). Cached vs uncached logits drift 5e-5 (7e-5 on
+random ids) with no bug: different input shapes, different summation order.
+
+Why old queries are not cached, as finally landed: corrupting an old token's
+q leaves the new token's output unchanged (0.0000); corrupting its k or v
+moves it (0.04, 3.04). Old rows of the grid exist only to make the old tokens'
+next-layer K and V -- once those are stored, the rows have no reader.
+
+### Step 9 mutation matrix
+
+| mutation | caught by |
+|---|---|
+| new tokens joined before old | update_cache append, cached forward, greedy[cache] |
+| slot never written | both update_cache, cache length, cached forward, greedy[cache] |
+| k and v swapped in the slot | both update_cache, cached forward, greedy[cache] |
+| keys stored before RoPE | cached forward, greedy[cache] -- wiring, end to end only |
+| keys stored after repeat_kv | **only** the cache-shape test (equivalent output) |
+| mask diagonal not shifted | mask test, both attend, cached forward, greedy[cache] |
+| attend passes q_len only (the "luck" mask) | **only** attend[q_len=3] and cached forward's 2-token chunk |
+| greedy feeds the new token at position 0 | greedy[cache] |
+| greedy never advances start (tokens stored twice) | greedy[cache] |
+| use_cache ignored, always caching | greedy[no cache] |
+
+Not tried: batch > 1 (greedy refuses it), calling forward twice by hand with
+one cache. The "luck" row is why a multi-token chunk after prefill is in the
+forward test: single-token decoding cannot see the mask at all.
+
 
 ## Step 8: greedy generation
 
@@ -362,6 +415,14 @@ Readings:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **`model_dir()` calls `snapshot_download`, which contacts the Hub even
+  when the model is cached.** On 2026-10-06 the Hub was unreachable and
+  `load_weights()` hung for minutes, then raised `RemoteProtocolError`. Set
+  `HF_HUB_OFFLINE=1` to read straight from the cache.
+- **A (1, 1) mask broadcasts silently across a (1, k_len) score row.** The
+  square causal mask was "correct" for single-token cached decoding by
+  accident. Any shape bug that happens to broadcast passes; test the shape
+  that does not.
 - **HF's `generate()` samples unless told not to.** The checkpoint's
   `generation_config.json` sets `do_sample: true`. A greedy oracle must pass
   `do_sample=False`.

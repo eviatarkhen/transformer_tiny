@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from tiny.generate import greedy
@@ -16,7 +17,8 @@ def hf_greedy(ids, hf_model, max_new_tokens):
         return hf_model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False)
 
 
-def test_matches_hf_generate(config, weights, hf_model, hf_tokenizer):
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_matches_hf_generate(config, weights, hf_model, hf_tokenizer, use_cache):
     """Twenty greedy tokens, identical to HF's, id for id.
 
     Exact equality because token ids are integers. Default sdpa rather than
@@ -26,17 +28,20 @@ def test_matches_hf_generate(config, weights, hf_model, hf_tokenizer):
 
     Also pins the return contract: prompt followed by the new tokens, and
     exactly max_new_tokens of them when no stop token appears.
+
+    Run with and without the KV cache: both paths must give HF's ids.
     """
     ids = hf_tokenizer("The capital of France is", return_tensors="pt").input_ids
     max_new_tokens = 20
 
-    got = greedy(ids, weights, config, max_new_tokens, STOP_IDS)
+    got = greedy(ids, weights, config, max_new_tokens, STOP_IDS, use_cache)
 
     assert got.shape == (1, ids.shape[1] + max_new_tokens)
     assert torch.equal(got, hf_greedy(ids, hf_model, max_new_tokens))
 
 
-def test_stops_at_a_stop_token(config, weights, hf_model, hf_tokenizer):
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_stops_at_a_stop_token(config, weights, hf_model, hf_tokenizer, use_cache):
     """Generation ends on the first stop token, and keeps it, as HF does.
 
     The prompt is a chat turn with thinking switched off, which the model
@@ -50,7 +55,7 @@ def test_stops_at_a_stop_token(config, weights, hf_model, hf_tokenizer):
     ids = hf_tokenizer(chat, return_tensors="pt").input_ids
     max_new_tokens = 30
 
-    got = greedy(ids, weights, config, max_new_tokens, STOP_IDS)
+    got = greedy(ids, weights, config, max_new_tokens, STOP_IDS, use_cache)
 
     assert got.shape[1] < ids.shape[1] + max_new_tokens
     assert got[0, -1].item() in STOP_IDS

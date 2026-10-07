@@ -13,6 +13,7 @@ def block(
     config: Config,
     layer: int,
     positions: torch.Tensor,
+    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
 ) -> torch.Tensor:
     """One decoder block: an attention half, then an MLP half.
 
@@ -22,6 +23,7 @@ def block(
         config: architecture.
         layer: which block's weights to read.
         positions: (seq,) integer positions, forwarded to attention.
+        cache: optional KV cache, forwarded to attention.
 
     Returns:
         (batch, seq, hidden_size), the same shape as x.
@@ -35,7 +37,7 @@ def block(
     eps = config.rms_norm_eps
 
     normed = rms_norm(x, w[p + "input_layernorm.weight"], eps)
-    x = x + attention(normed, w, config, layer, positions)
+    x = x + attention(normed, w, config, layer, positions, cache)
 
     normed = rms_norm(x, w[p + "post_attention_layernorm.weight"], eps)
     return x + mlp(normed, w, layer)
@@ -62,6 +64,7 @@ def run_blocks(
     w: dict[str, torch.Tensor],
     config: Config,
     positions: torch.Tensor,
+    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
 ) -> torch.Tensor:
     """Run all layers blocks
 
@@ -72,12 +75,13 @@ def run_blocks(
         positions: (seq,) integer positions. A tensor rather than a length, so
             incremental decoding can pass e.g. tensor([100]) with no offset
             parameter.
+        cache: optional KV cache, one slot per layer, forwarded to each block.
 
     Returns:
        (batch, seq, hidden_size) residual state
     """
     for layer in range(config.num_hidden_layers):
-        x = block(x, w, config, layer, positions)
+        x = block(x, w, config, layer, positions, cache)
 
     return x
 
@@ -132,6 +136,7 @@ def forward(
     w: dict[str, torch.Tensor],
     config: Config,
     positions: torch.Tensor,
+    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
 ) -> torch.Tensor:
     """The whole model: token ids in, next-token logits out.
 
@@ -143,12 +148,15 @@ def forward(
             than defaulting to arange(seq): for a fresh prompt the caller
             passes exactly that, but once a KV cache exists a single new token
             can sit at position 100, and only the caller knows.
+        cache: optional KV cache, one slot per layer, modified in place. With
+            it, ids may be just the new tokens: their keys and values join
+            those already stored, and the logits cover only the new tokens.
 
     Returns:
         (batch, seq, vocab_size) logits. Row i scores the token that follows
         position i, having seen positions 0..i only.
     """
     x = embed(ids, w)
-    x = run_blocks(x, w, config, positions)
+    x = run_blocks(x, w, config, positions, cache)
     x = final_norm(x, w, config)
     return lm_head(x, w)

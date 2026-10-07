@@ -32,35 +32,68 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return x.repeat_interleave(n_rep, dim=1)
 
 
-def causal_mask(seq: int) -> torch.Tensor:
-    """(seq, seq) additive mask: 0 where attending is allowed, -inf above the diagonal.
+def update_cache(
+    cache: list[tuple[torch.Tensor, torch.Tensor] | None],
+    layer: int,
+    k_new: torch.Tensor,
+    v_new: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Join this turn's keys and values to the layer's stored ones.
+
+    Args:
+        cache: one slot per layer. A slot is None until the layer's first call,
+            then (k, v) for every token seen so far. MODIFIED IN PLACE: calling
+            twice with the same k_new stores those tokens twice.
+        layer: which slot to read and replace.
+        k_new, v_new: (batch, heads, new, head_dim), the keys and values of the
+            tokens in this call -- the whole prompt at prefill, one token after.
+
+    Returns:
+        (k, v), each (batch, heads, stored + new, head_dim): the old tokens
+        first, then the new ones. The same pair is what the slot now holds.
+    """
+    if cache[layer] is not None:
+        k_old, v_old = cache[layer]
+        k_new = torch.cat([k_old, k_new], dim=-2)
+        v_new = torch.cat([v_old, v_new], dim=-2)
+    cache[layer] = (k_new, v_new)
+    return k_new, v_new
+
+
+def causal_mask(q_len: int, k_len: int | None = None) -> torch.Tensor:
+    """(q_len, k_len) additive mask: 0 where attending is allowed, -inf where not.
 
     Added to the scores *before* the softmax, so forbidden positions contribute
     nothing to the denominator and the allowed ones renormalize to sum to 1.
+
+    The q rows are the *last* q_len of the k_len positions. Without a cache the
+    two are equal and this is the familiar square with -inf above the diagonal.
+    With one, q is 1 new token against k_len stored ones: the diagonal shifts
+    right by k_len - q_len, and a single row has nothing to mask at all.
     """
-    return torch.full((seq, seq), float("-inf")).triu(1)
+    if k_len is None:
+        k_len = q_len
+    return torch.full((q_len, k_len), float("-inf")).triu(k_len - q_len + 1)
 
 
 def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Causal scaled dot-product attention.
 
     Args:
-        q, k, v: (batch, heads, seq, head_dim), with k and v already expanded to
-            q's head count by repeat_kv.
+        q: (batch, heads, q_len, head_dim).
+        k, v: (batch, heads, k_len, head_dim), already expanded to q's head
+            count by repeat_kv. k_len >= q_len: with a cache, k and v also hold
+            every earlier token, and q's rows are the last q_len of them.
 
     Returns:
-        (batch, heads, seq, head_dim).
+        (batch, heads, q_len, head_dim).
 
     Notes:
         The scale is read off q's own last dimension rather than passed in, so
         this needs no config and can be unit tested on toy sizes.
-
-        The mask is square because q and k are the same length here. A KV cache
-        breaks that assumption -- q_len becomes 1 while k_len stays long -- so
-        this is the line step 9 has to revisit.
     """
     scores = (q @ k.transpose(-2, -1)) * q.shape[-1] ** -0.5
-    weights = torch.softmax(scores + causal_mask(q.shape[-2]), dim=-1)
+    weights = torch.softmax(scores + causal_mask(q.shape[-2], k.shape[-2]), dim=-1)
     return weights @ v
 
 
@@ -70,6 +103,7 @@ def attention(
     config: Config,
     layer: int,
     positions: torch.Tensor,
+    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
 ) -> torch.Tensor:
     """Grouped-query causal self-attention for one block.
 
@@ -83,6 +117,11 @@ def attention(
             seq=1 can mean position 100. The rotation tables are built from
             them here: they are this function's detail, and recomputing a
             (seq, head_dim) table per layer is noise next to the matmuls.
+        cache: optional, see update_cache. None means no cache, exactly as
+            before. Given, this layer's keys and values are stored after RoPE
+            and before repeat_kv: a key's rotation depends only on its own
+            position, so it is final once made, and storing 8 heads rather
+            than 16 halves the memory.
 
     Returns:
         (batch, seq, hidden_size), the same shape as x.
@@ -101,6 +140,9 @@ def attention(
     cos, sin = rope_cos_sin(positions, config.head_dim, config.rope_theta)
     q = apply_rope(q, cos, sin)
     k = apply_rope(k, cos, sin)
+
+    if cache is not None:
+        k, v = update_cache(cache, layer, k, v)
 
     n_rep = heads // kv_heads
     k = repeat_kv(k, n_rep)
