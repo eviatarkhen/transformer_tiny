@@ -133,8 +133,12 @@ A component is `f(x, weights, config) -> y`. Every data dependency stays visible
 
 ## Out of scope, deliberately
 
-Training, the BPE tokenizer (use `AutoTokenizer`), chat templates, quantization,
-flash attention. Each is a fine sequel; none is needed to understand the transformer.
+Training, the BPE tokenizer (use `AutoTokenizer`), chat templates, flash attention.
+Each is a fine sequel; none is needed to understand the transformer.
+
+Amended 2026-10-08, in step 10, on Eviatar's call: **quantization moved in scope**,
+starting with int8 weight-only. The scheme -- rounding, scales, group size -- is ours
+to write; that is where its decisions live.
 
 ## Commands
 

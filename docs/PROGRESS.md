@@ -11,9 +11,23 @@ continue from "Next action".
 ## Next action
 
 **Step 10: optimize -- pieces 1 (bf16 + MPS) and 2 (preallocated cache)
-done; piece 3, `torch.compile`, next.** Not started; theory not delivered.
+done; piece 3 is now quantization, int8 weight-only, per-row scales.**
+Theory delivered (2026-10-08); design not yet agreed. `CLAUDE.md` amended to
+bring quantization in scope.
 
-Why it is next: MPS gained nothing from piece 2 (43.4 -> 43.4 tok/s f32)
+Theory as delivered, measured on layer 13 `down_proj` (1024x3072; max |w| is
+32x the median): output error int8 per-tensor 4.6%, per-row 1.1%, groups of
+128 0.76%, groups of 32 0.58%; int4 71% / 21% / 13% / 10.5%. Weight-only
+because of step 6's massive activations. A naive `x @ (q * scale).T`
+rebuilds the full matrix every turn and reads *more* bytes than bf16; a gain
+needs a fused dequantize-in-the-matmul kernel (`torch._weight_int8pack_mm`
+exists; speed on this CPU / MPS unmeasured). Testing moves off 1e-4 parity
+to per-matrix error, greedy agreement with bf16, and perplexity.
+
+**`torch.compile` withdrawn** by Eviatar (2026-10-08), before theory. The
+notes below on why it was next are kept for a later return.
+
+Why compile was next: MPS gained nothing from piece 2 (43.4 -> 43.4 tok/s f32)
 and only 1.16x over CPU from piece 1, against 1.9x on its matmuls alone.
 ~600 small ops per turn, each with a fixed GPU launch cost (2.8 us vs 0.7 us
 on CPU), dominate there. Fusion attacks exactly that. Shapes are now static
