@@ -60,8 +60,9 @@ def update_cache(
     return k_new, v_new
 
 
-def causal_mask(q_len: int, k_len: int | None = None) -> torch.Tensor:
-    """(q_len, k_len) additive mask: 0 where attending is allowed, -inf where not.
+def causal_mask(scores: torch.Tensor) -> torch.Tensor:
+    """(q_len, k_len) additive mask for scores (..., q_len, k_len): 0 where
+    attending is allowed, -inf where not.
 
     Added to the scores *before* the softmax, so forbidden positions contribute
     nothing to the denominator and the allowed ones renormalize to sum to 1.
@@ -70,10 +71,14 @@ def causal_mask(q_len: int, k_len: int | None = None) -> torch.Tensor:
     two are equal and this is the familiar square with -inf above the diagonal.
     With one, q is 1 new token against k_len stored ones: the diagonal shifts
     right by k_len - q_len, and a single row has nothing to mask at all.
+
+    Takes the scores themselves, not their lengths, so the mask inherits their
+    dtype and device through new_full and cannot be built wrong: a float32
+    mask silently promotes bf16 scores, and a CPU mask cannot be added to MPS
+    scores at all. -inf exists in bf16, so the mask stays exact.
     """
-    if k_len is None:
-        k_len = q_len
-    return torch.full((q_len, k_len), float("-inf")).triu(k_len - q_len + 1)
+    q_len, k_len = scores.shape[-2:]
+    return scores.new_full((q_len, k_len), float("-inf")).triu(k_len - q_len + 1)
 
 
 def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -91,9 +96,16 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     Notes:
         The scale is read off q's own last dimension rather than passed in, so
         this needs no config and can be unit tested on toy sizes.
+
+        The softmax runs in float32 and is cast back, as in HF's eager path.
+        Measured redundant: PyTorch's bf16 softmax already accumulates in
+        float32 internally, bitwise identical on CPU and MPS. Kept explicit
+        because it is the decision, and a backend that did not do it
+        silently would lose small weights to rounding.
     """
     scores = (q @ k.transpose(-2, -1)) * q.shape[-1] ** -0.5
-    weights = torch.softmax(scores + causal_mask(q.shape[-2], k.shape[-2]), dim=-1)
+    scores = scores + causal_mask(scores)
+    weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
     return weights @ v
 
 
@@ -112,11 +124,12 @@ def attention(
         w: the full weight dict, keyed exactly as the checkpoint is.
         config: architecture; every shape below is derived from it.
         layer: which block's weights to read.
-        positions: (seq,) integer position of each token in x. Passed in
-            because once a KV cache exists only the caller knows them --
-            seq=1 can mean position 100. The rotation tables are built from
-            them here: they are this function's detail, and recomputing a
-            (seq, head_dim) table per layer is noise next to the matmuls.
+        positions: (seq,) integer position of each token in x, on x's
+            device. Passed in because once a KV cache exists only the caller
+            knows them -- seq=1 can mean position 100. The rotation tables
+            are built from them here: they are this function's detail, and
+            recomputing a (seq, head_dim) table per layer is noise next to
+            the matmuls.
         cache: optional, see update_cache. None means no cache, exactly as
             before. Given, this layer's keys and values are stored after RoPE
             and before repeat_kv: a key's rotation depends only on its own

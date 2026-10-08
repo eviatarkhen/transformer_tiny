@@ -29,9 +29,14 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
         - Used at two sizes: 1024 in the block, 128 per head for q_norm/k_norm.
           Write it against the last dimension and both work. `keepdim=True` on
           the mean is what keeps the broadcast right.
+        - Computed in float32 whatever x's dtype, then cast back before the
+          weight, exactly as HF's Qwen3RMSNorm. In bf16 the mean of 1024
+          squares -- up to ~4e7 once the stream reaches 6,592 -- would keep
+          only 3 significant digits. A no-op when x is already float32.
     """
-    inv_rms = (x.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
-    return x * inv_rms * weight
+    x32 = x.to(torch.float32)
+    inv_rms = (x32.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
+    return (x32 * inv_rms).to(x.dtype) * weight
 
 
 def rope_cos_sin(
@@ -48,10 +53,11 @@ def rope_cos_sin(
             a longer range.
 
     Returns:
-        (cos, sin), each (seq, head_dim). Broadcasts against
-        (batch, heads, seq, head_dim) unchanged.
+        (cos, sin), each (seq, head_dim), float32 and on positions' device.
+        Always float32: in bf16 an angle near 1000 has a resolution of 4
+        radians. apply_rope casts the finished tables to x's dtype.
     """
-    inv_freq = 1 / (theta ** (torch.arange(0, head_dim, 2) / head_dim))
+    inv_freq = 1 / (theta ** (torch.arange(0, head_dim, 2, device=positions.device) / head_dim))
     angles = positions.float()[:, None] * inv_freq[None, :]
     table = torch.cat([angles, angles], dim=-1)
     return table.cos(), table.sin()
@@ -79,9 +85,11 @@ def apply_rope(
     Args:
         x: (batch, heads, seq, head_dim).
         cos, sin: (seq, head_dim) from rope_cos_sin. Broadcasting handles the
-            batch and head dimensions.
+            batch and head dimensions. Cast to x's dtype here: float32 tables
+            times bf16 x would promote the result -- q and k -- to float32.
 
     Returns:
-        Same shape as x.
+        Same shape and dtype as x.
     """
+    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
     return x * cos + rotate_half(x) * sin

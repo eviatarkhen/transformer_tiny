@@ -140,7 +140,7 @@ def test_causal_mask_structure():
     triangle and make an is-neginf check on the whole tensor trivially false.
     """
     seq = 6
-    mask = causal_mask(seq)
+    mask = causal_mask(torch.zeros(seq, seq))
     future = torch.triu(torch.ones(seq, seq, dtype=torch.bool), diagonal=1)
 
     assert mask.shape == (seq, seq)
@@ -158,7 +158,7 @@ def test_causal_mask_renormalizes_after_softmax():
     seq = 6
     torch.manual_seed(0)
     scores = torch.randn(1, 2, seq, seq)
-    w = torch.softmax(scores + causal_mask(seq), dim=-1)
+    w = torch.softmax(scores + causal_mask(scores), dim=-1)
 
     torch.testing.assert_close(w.sum(-1), torch.ones(1, 2, seq), atol=1e-6, rtol=0)
     assert torch.equal(w[0, 0].triu(1), torch.zeros(seq, seq))
@@ -286,7 +286,7 @@ def test_matches_hf_eager(config, weights, hf_model):
         k = attn.k_norm(attn.k_proj(x).view(shape)).transpose(1, 2)
         v = attn.v_proj(x).view(shape).transpose(1, 2)
         q, k = apply_rotary_pos_emb(q, k, hf_cos, hf_sin)
-        mask = causal_mask(seq)[None, None]
+        mask = causal_mask(torch.zeros(seq, seq))[None, None]
         out, _ = eager_attention_forward(
             attn, q, k, v, mask, scaling=config.head_dim**-0.5
         )

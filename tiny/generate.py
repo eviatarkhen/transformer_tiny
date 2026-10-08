@@ -22,9 +22,10 @@ def greedy(
     kept as the benchmark baseline.
 
     Args:
-        ids: (1, seq) prompt token ids. One prompt only: prompts in a batch
-            would stop at different times and need padding, which is out of
-            scope.
+        ids: (1, seq) prompt token ids, on the weights' device -- the
+            tokenizer returns CPU tensors, so for MPS the caller moves them.
+            One prompt only: prompts in a batch would stop at different times
+            and need padding, which is out of scope.
         w: the full weight dict, keyed exactly as the checkpoint is.
         config: architecture.
         max_new_tokens: upper bound on how many tokens to append.
@@ -45,7 +46,7 @@ def greedy(
     cache = [None] * config.num_hidden_layers if use_cache else None
     start = 0
     for _ in range(max_new_tokens):
-        logits = forward(ids[:, start:], w, config, torch.arange(start, ids.shape[1]), cache)
+        logits = forward(ids[:, start:], w, config, torch.arange(start, ids.shape[1], device=ids.device), cache)
         token = logits[0, -1].argmax()
         ids = torch.cat([ids, token.view(1, 1)], dim=1)
         if token.item() in stop_ids:

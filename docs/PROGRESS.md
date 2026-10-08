@@ -10,20 +10,22 @@ continue from "Next action".
 
 ## Next action
 
-**Step 10: optimize.** Not started, and not yet scoped: the step table names
-it but nothing says what it targets. Start by measuring where the time goes
-in a cached turn, then let Eviatar pick the target. Candidates, unranked:
-the per-turn `torch.cat` in `update_cache` (copies the whole cache every
-token), MPS instead of CPU, bf16 instead of float32 (needs a looser parity
-tolerance), and `torch.compile`.
+**Step 10: optimize -- piece 1 (bf16 + MPS) done; pieces 2-3 next.** Eviatar
+chose all three candidates, bf16 first. Remaining, in this order:
 
-Speed to beat (CPU, float32, best of 3, `"The capital of France is"`):
-**greedy(use_cache=True): 39.8 tok/s at 10 new tokens, 43.1 at 30, 41.9 at
-100.** Without the cache: 16.2 and 14.5. Benchmark with
-`greedy(..., use_cache=False)` vs the default; the scratchpad script from
-step 9 is not kept, so rewrite it -- best of 3, after one warm-up.
+1. **Preallocated KV cache.** `update_cache` copies the whole cache every
+   turn (`cat`), and so does `repeat_kv` (`repeat_interleave`, 8 -> 16 heads,
+   every layer). Both grow with context. Fixed-size buffers also make shapes
+   static, which piece 3 needs.
+2. **`torch.compile`.** MPS float32 gained only 1.16x end to end against
+   1.9x on its matmuls: ~600 small ops per turn, each with a fixed GPU launch
+   cost (2.8 us vs 0.7 on CPU). Fusion attacks exactly that. A growing cache
+   forces recompiles, hence piece 1 first.
 
-Deliver the theory first, then agree the design, then Eviatar implements.
+Benchmark with `scripts/decode.py` (`--dtype bf16 --device mps`,
+`--no-cache`, `--torch-profile`). Speed to beat, 100-token prompt + 300
+tokens: **CPU f32 36.0, CPU bf16 21.2, MPS f32 43.4, MPS bf16 46.8 tok/s.**
+Short runs understate MPS (first calls compile GPU kernels).
 
 ## Step status
 
@@ -39,7 +41,7 @@ Deliver the theory first, then agree the design, then Eviatar implements.
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
 | 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
-| 10 | optimize | next | — |
+| 10 | optimize | **in progress** (bf16 + MPS done) | `tests/test_dtype_device.py`, 6 tests |
 | 11 | sampling | not started | — |
 
 ## Environment (verified 2026-09-16)
@@ -109,6 +111,60 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 10, piece 1: bf16 and MPS
+
+**Written by Claude**, code and tests, at Eviatar's request ("you write
+everthing"). Beat 3 skipped. Theory went: how profiling works at three levels
+(cProfile / torch.profiler / OS: `time -l`, `sample`, py-spy, Instruments),
+how the candidates were ranked (map each op to our code, Amdahl's bound, then
+bytes-per-multiply), how a tolerance is set (noise floor < tolerance <
+smallest bug).
+
+Profile of a cached turn (CPU f32, 100 context): `mm` 68% (exactly 197 per
+turn = 28 x 7 + lm_head), `copy_`+`cat` 12%, `bmm`+softmax 7%. One token reads
+all 596M weights: 2.4 GB / 25 ms = ~95 GB/s. Memory-bound, by inference --
+not measured with hardware counters (no Xcode on this machine).
+
+Design:
+
+- **`load_weights(dtype=float32, device="cpu")`** is the one place both are
+  chosen. Defaults unchanged, so every float32 test is untouched. float32
+  stays the testing dtype: bf16 noise (~0.7 on the logits) would hide the
+  bugs the 1e-4 suite catches.
+- **Every tensor tiny/ creates inherits from an input**, never a default:
+  `rope_cos_sin` from `positions.device`; `causal_mask(scores)` via
+  `scores.new_full` (on Eviatar's challenge -- it first took `dtype`/`device`
+  arguments); greedy's positions from `ids.device`. Factory functions
+  (`full`, `arange`) default to CPU float32; ops on existing tensors promote.
+- **Precision islands matched to HF**, read from the installed source:
+  `rms_norm` computes in float32 and casts back *before* the weight; softmax
+  `dtype=float32` then cast back; RoPE tables built in float32, cast to x's
+  dtype inside `apply_rope` (moved there from `attention`, also on his
+  challenge).
+- **CPU bf16 kept bit-exact with HF**, slow, on Eviatar's call. Upcasting the
+  attention bmm to float32 is 6x faster at 100 context but changes 2 in
+  ~11,000 scores by one bf16 step. MPS bf16 is the fast path.
+
+Measured: our bf16 equals HF bf16 eager **exactly (0.0)** on CPU, so the bf16
+path is tested at the float32 tolerance. MPS f32 vs CPU f32: 6.4e-5.
+
+### Step 10 piece 1 mutation matrix
+
+| mutation | caught by |
+|---|---|
+| rms_norm without the float32 island | rms_norm_bf16, forward_bf16 |
+| rms_norm casts back after the weight | rms_norm_bf16, forward_bf16 |
+| RoPE angles rounded to bf16 | 32 tests, every float32 parity |
+| cos/sin not cast to x's dtype | forward_bf16 |
+| mask dtype ignored | causal_mask dtype test |
+| RoPE inv_freq on default device | both MPS parity |
+| mask device ignored | both MPS parity |
+| greedy positions on default device | **only** greedy_on_mps |
+| load_weights ignores device / dtype | load_to_mps / three bf16 tests |
+| softmax without the float32 island | **none -- equivalent**: PyTorch's bf16 softmax accumulates in float32, bitwise equal on CPU and MPS |
+| attend not passing the mask's dtype (pre-`new_full` design) | **none -- equivalent**: float32 mask promotes exactly, island casts back |
+
 
 ## Step 9: KV cache
 
@@ -415,6 +471,18 @@ Readings:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **A benchmark that reuses one matrix measures the cache, not memory.** One
+  3072x1024 float32 matrix (12.6 MB) fits in the M5 Pro's cache: bf16 looked
+  *slower* than float32. 84 distinct matrices (1 GB) gave the real answer,
+  bf16 1.54x faster. Memory-bound benchmarks need data bigger than cache.
+- **CPU bf16 `bmm` has no fast kernel here.** The attention score matmuls
+  went 10.5 -> 148 ms per 10 turns in bf16; weight `mm` improved 183 -> 132.
+  Net: CPU bf16 is slower than float32, and worse with longer context.
+- **MPS is asynchronous.** Python queues work and returns; without
+  `torch.mps.synchronize()` before reading the clock, a timer measures
+  queueing. The torch.profiler CPU table has the same blind spot.
+- **zsh does not word-split unquoted variables.** `for a in "--dtype bf16"`
+  then `cmd $a` passes one argument; argparse rejects it. Use `${=a}`.
 - **`model_dir()` calls `snapshot_download`, which contacts the Hub even
   when the model is cached.** On 2026-10-06 the Hub was unreachable and
   `load_weights()` hung for minutes, then raised `RemoteProtocolError`. Set

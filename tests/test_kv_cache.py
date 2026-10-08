@@ -49,7 +49,7 @@ def test_causal_mask_rectangular():
     """3 new queries against 6 keys: each query is one of the LAST 3 positions.
 
     Query row i sits at position 3 + i, so it may see keys 0..3+i. The single-
-    row case has nothing to mask, and one argument still means the square.
+    row case has nothing to mask, and equal lengths give the familiar square.
     """
     inf = float("-inf")
     expected = torch.tensor([
@@ -58,9 +58,9 @@ def test_causal_mask_rectangular():
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     ])
 
-    assert torch.equal(causal_mask(3, 6), expected)
-    assert torch.equal(causal_mask(1, 6), torch.zeros(1, 6))
-    assert torch.equal(causal_mask(5), causal_mask(5, 5))
+    assert torch.equal(causal_mask(torch.zeros(3, 6)), expected)
+    assert torch.equal(causal_mask(torch.zeros(1, 6)), torch.zeros(1, 6))
+    assert torch.equal(causal_mask(torch.zeros(3, 3)), expected[:, 3:])
 
 
 @pytest.mark.parametrize("q_len", [1, 3])

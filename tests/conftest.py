@@ -63,3 +63,28 @@ def hf_model_eager(hf_model):
         yield hf_model
     finally:
         hf_model.set_attn_implementation(original)
+
+
+# --- bf16 and MPS (step 10) -------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def weights_bf16() -> dict[str, torch.Tensor]:
+    return load_weights(dtype=torch.bfloat16)
+
+
+@pytest.fixture(scope="session")
+def hf_model_bf16_eager():
+    """HF's Qwen3 in bf16 on the eager path: the oracle for our bf16 path.
+
+    A second copy rather than a cast of hf_model, which every float32 test
+    shares. Eager because it is the same matmul-softmax-matmul we wrote, and
+    with HF's float32 islands (RMSNorm, softmax, RoPE tables) matched, our
+    bf16 forward equals it exactly on CPU -- so the bf16 path keeps the 1e-4
+    tolerance instead of the ~1.0 that bf16-vs-float32 would need.
+    """
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, dtype=torch.bfloat16, attn_implementation="eager"
+    )
+    model.eval()
+    return model
