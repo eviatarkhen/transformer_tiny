@@ -10,9 +10,13 @@ continue from "Next action".
 
 ## Next action
 
-**Step 11: sampling.** Not started; theory not yet delivered. Step 10 closed
-2026-10-08 with three pieces (bf16 + MPS, preallocated cache, int8); int4
-and `torch.compile` left as sequels.
+**All planned steps are closed.** Step 11 (sampling) was deferred by
+Eviatar on 2026-10-08, after piece 1's theory (real distributions: ` Paris`
+65.7% on the France prompt, top 8 = 77.5%; the checkpoint's
+generation_config asks for temperature 0.6, top-k 20, top-p 0.95; oracle
+would be HF `generate(do_sample=True)` under a shared seed). Step 10 closed
+the same day with three pieces; int4 and `torch.compile` left as sequels.
+Nothing is queued -- the next step is Eviatar's choice.
 
 Step 10's final speed, 100-token prompt + 300 tokens (MPS runs vary ~15% run to run):
 
@@ -53,7 +57,7 @@ tokens: **CPU f32 43.2, CPU bf16 31.5, MPS f32 43.4, MPS bf16 47.9 tok/s.**
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
 | 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
 | 10 | optimize | **done** (bf16 + MPS, preallocated cache, int8) | `test_dtype_device` 7, `test_quantize` 10 |
-| 11 | sampling | next | — |
+| 11 | sampling | **deferred** (theory piece 1 only) | — |
 
 ## Environment (verified 2026-09-16)
 
