@@ -4,6 +4,7 @@
     uv run python scripts/decode.py --torch-profile # + op table and trace.json
     uv run python scripts/decode.py --no-cache      # the step 8 path, for contrast
     uv run python scripts/decode.py --dtype bf16 --device mps
+    uv run python scripts/decode.py --int8          # int8 weights, see tiny/quantize.py
 """
 
 import argparse
@@ -21,6 +22,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from tiny.attention import allocate_cache
 from tiny.config import Config, model_dir
 from tiny.model import forward
+from tiny.quantize import quantize_weights
 from tiny.weights import load_weights
 
 parser = argparse.ArgumentParser()
@@ -30,12 +32,15 @@ parser.add_argument("--no-cache", action="store_true")
 parser.add_argument("--torch-profile", action="store_true")
 parser.add_argument("--dtype", choices=["f32", "bf16"], default="f32")
 parser.add_argument("--device", choices=["cpu", "mps"], default="cpu")
+parser.add_argument("--int8", action="store_true", help="int8 weights, --dtype activations")
 args = parser.parse_args()
 
 t0 = time.perf_counter()
 config = Config.from_json(model_dir() / "config.json")
 dtype = {"f32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
 w = load_weights(dtype=dtype, device=args.device)
+if args.int8:
+    w = quantize_weights(w)
 print(f"load:    {time.perf_counter() - t0:6.2f} s")
 
 torch.manual_seed(0)

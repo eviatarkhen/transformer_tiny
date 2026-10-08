@@ -88,3 +88,10 @@ def hf_model_bf16_eager():
     )
     model.eval()
     return model
+
+
+@pytest.fixture(scope="session")
+def weights_int8(weights) -> dict:
+    from tiny.quantize import quantize_weights
+
+    return quantize_weights(weights)

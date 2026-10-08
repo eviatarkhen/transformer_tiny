@@ -10,19 +10,20 @@ continue from "Next action".
 
 ## Next action
 
-**Step 10: optimize -- pieces 1 (bf16 + MPS) and 2 (preallocated cache)
-done; piece 3 is now quantization, int8 weight-only, per-row scales.**
-Theory delivered (2026-10-08); design not yet agreed. `CLAUDE.md` amended to
-bring quantization in scope.
+**Step 10: optimize -- three pieces done** (bf16 + MPS, preallocated cache,
+int8 weight-only quantization). Nothing is queued. Open directions, none
+chosen: int4 (needs groups; 10-21% output error per matrix measured, and
+packing two values per byte), `torch.compile` (withdrawn, notes below), or
+close step 10 and move to step 11, sampling.
 
-Theory as delivered, measured on layer 13 `down_proj` (1024x3072; max |w| is
-32x the median): output error int8 per-tensor 4.6%, per-row 1.1%, groups of
-128 0.76%, groups of 32 0.58%; int4 71% / 21% / 13% / 10.5%. Weight-only
-because of step 6's massive activations. A naive `x @ (q * scale).T`
-rebuilds the full matrix every turn and reads *more* bytes than bf16; a gain
-needs a fused dequantize-in-the-matmul kernel (`torch._weight_int8pack_mm`
-exists; speed on this CPU / MPS unmeasured). Testing moves off 1e-4 parity
-to per-matrix error, greedy agreement with bf16, and perplexity.
+Speed now, 100-token prompt + 300 tokens (MPS runs vary ~15% run to run):
+
+| | float weights | int8 weights |
+|---|---|---|
+| CPU f32 activations | 42.7 | **55.9** |
+| CPU bf16 activations | 30.3 | 39.1 |
+| MPS f32 activations | 50.3 | **72.5** (best) |
+| MPS bf16 activations | 59.3 | 64.7 |
 
 **`torch.compile` withdrawn** by Eviatar (2026-10-08), before theory. The
 notes below on why it was next are kept for a later return.
@@ -53,7 +54,7 @@ tokens: **CPU f32 43.2, CPU bf16 31.5, MPS f32 43.4, MPS bf16 47.9 tok/s.**
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
 | 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
-| 10 | optimize | **in progress** (bf16 + MPS, preallocated cache done) | `tests/test_dtype_device.py`, 7 tests; `test_kv_cache` |
+| 10 | optimize | **3 pieces done** (bf16 + MPS, preallocated cache, int8) | `test_dtype_device` 7, `test_quantize` 10 |
 | 11 | sampling | not started | — |
 
 ## Environment (verified 2026-09-16)
@@ -123,6 +124,61 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 10, piece 3: int8 weight-only quantization
+
+**Written by Claude, all decisions Claude's**, at Eviatar's request ("you
+write and make all decisions"). `CLAUDE.md` amended to bring quantization in
+scope; `torch.compile` withdrawn.
+
+Measured first: `torch._weight_int8pack_mm` (fused dequantize-in-the-matmul)
+on 84 3072x1024 matrices -- CPU 4.59 ms vs 8.04 f32 / 5.24 bf16; MPS 1.22 vs
+3.98 / 2.13. Spelled-out `x @ (q * scale).T` is 17-22 ms: 2-10x *slower*
+than not quantizing.
+
+Decisions:
+
+- **`tiny/quantize.py`**: `quantize_rows(weight) -> (q int8, scale)`,
+  symmetric, one scale per output row, `scale = max|row| / 127` floored at
+  1e-12 for all-zero rows, kept in the weight's dtype (the kernel needs the
+  activations' dtype), q rounded against the stored scale.
+  `quantize_weights(w)` returns a new dict.
+- **Quantized: the 7 `*_proj.weight` of every layer, and the LM head** as a
+  separate int8 copy under `LM_HEAD_INT8 = "lm_head.int8"` -- a key no
+  checkpoint has, so step 7's tied-table reading is unchanged for plain
+  weights. The embedding lookup keeps the full table (one row per token).
+  Norms untouched. The file's duplicate `lm_head.weight` stays, unused.
+- **`project(x, weight)` takes a tensor or a `(q, scale)` pair**: one
+  `isinstance` branch in one place, no call site changed. The `w` dict
+  annotations (`dict[str, Tensor]`) are now loose -- values can be pairs.
+- **The private kernel accepted**: rounding and scales are ours; a test
+  checks it against the spelled-out arithmetic.
+
+Quality, measured: logits relative error vs float32 on random ids -- int8
+per-row 9.5%, per-matrix 22%, bf16 3.1%. Perplexity on a fixed 99-token
+paragraph -- float32 23.85, bf16 23.81, **int8 23.63** (noise), per-matrix
+26.17. Greedy text on the France prompt identical in every variant. LM head
+quantization adds almost nothing (9.46% -> 9.51%).
+
+### Step 10 piece 3 mutation matrix
+
+| mutation | caught by |
+|---|---|
+| one scale for the whole matrix | error bound, logits band, perplexity |
+| truncate instead of round | error bound, logits band, perplexity |
+| 255 levels | hand example, error bound, logits band, perplexity |
+| no zero-row floor | **only** hand example |
+| scale in float32, not the weight's dtype | **none at first** -- equivalent on f32; added `keeps_the_scale_in_the_weights_dtype` |
+| no int8 lm_head copy | **only** the selection test (quality barely moves) |
+| embedding table quantized too | selection, logits, perplexity, MPS |
+| only attention projections quantized | **only** the selection test |
+| lm_head ignores the int8 copy | **only** lm_head_reads_the_int8_copy |
+| project: dequantize then multiply | **none at first** -- same numbers, 2-10x slower; added `uses_the_fused_kernel`, a profiler-based performance test |
+| project: scale ignored | kernel parity, logits, perplexity, MPS |
+
+The second added test is the first deterministic performance test in the
+suite: it asserts which kernel runs, not how fast.
+
 
 ## Step 10, piece 2: preallocated cache, no repeat_kv
 
@@ -535,6 +591,13 @@ Readings:
 Running list of things that actually bit us, and how they were found.
 The highest-value section in this file — these are exactly what gets lost.
 
+- **`torch._weight_int8pack_mm` requires N % 32 == 0 and K % 32 == 0.**
+  Every Qwen3-0.6B matrix qualifies (vocab 151,936 = 32 x 4,748); a model
+  with an odd vocab size would raise.
+- **Max-abs logit diff can mislead where perplexity does not.** int8 on MPS
+  vs CPU: one logit 0.30 apart on random ids (float noise born at layer 2's
+  massive activation, amplified), yet perplexity 23.6288 vs 23.6293 and
+  identical greedy text. Pick the metric that states the claim.
 - **A benchmark that reuses one matrix measures the cache, not memory.** One
   3072x1024 float32 matrix (12.6 MB) fits in the M5 Pro's cache: bf16 looked
   *slower* than float32. 84 distinct matrices (1 GB) gave the real answer,

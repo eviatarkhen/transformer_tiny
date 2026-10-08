@@ -4,6 +4,7 @@ from tiny.attention import Cache, attention
 from tiny.config import Config
 from tiny.layers import project, rms_norm
 from tiny.mlp import mlp
+from tiny.quantize import LM_HEAD_INT8
 from tiny.weights import layer_prefix
 
 
@@ -120,6 +121,10 @@ def lm_head(
     duplicate lm_head.weight, but many tied checkpoints do not; an untied
     model would need lm_head.weight instead.
 
+    After quantize_weights, an int8 copy of the same table sits under
+    LM_HEAD_INT8 and is read instead. The embedding lookup keeps the full
+    table either way.
+
     Args:
         x: (batch, seq, hidden_size), the stream after final_norm.
         w: the full weight dict, keyed exactly as the checkpoint is.
@@ -128,7 +133,7 @@ def lm_head(
         (batch, seq, vocab_size) logits for every position, not just the
         last. Generation needs only the last row; slicing is the caller's job.
     """
-    return project(x, w["model.embed_tokens.weight"])
+    return project(x, w.get(LM_HEAD_INT8, w["model.embed_tokens.weight"]))
 
 
 def forward(

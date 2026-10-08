@@ -1,9 +1,31 @@
 import torch
 
 
-def project(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+def project(
+    x: torch.Tensor, weight: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+) -> torch.Tensor:
     """Apply one of the checkpoint's bias-free linear layers.
+
+    Args:
+        x: (..., in).
+        weight: (out, in) as stored, or an int8 (q, scale) pair from
+            quantize_rows.
+
+    Returns:
+        (..., out).
+
+    Notes:
+        The int8 path calls a fused kernel that dequantizes inside the
+        multiply. Spelling it out -- x @ (q * scale).T -- rebuilds the whole
+        float matrix every call and measured 2-10x *slower* than not
+        quantizing at all. The kernel only multiplies; rounding and scales,
+        the decisions, are quantize_rows'. test_quantize checks it against
+        the spelled-out version.
     """
+    if isinstance(weight, tuple):
+        q, scale = weight
+        out = torch._weight_int8pack_mm(x.reshape(-1, x.shape[-1]), q, scale)
+        return out.view(*x.shape[:-1], -1)
     return x @ weight.T
 
 
