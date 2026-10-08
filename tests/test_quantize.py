@@ -3,7 +3,8 @@ import torch
 
 from tiny.layers import project
 from tiny.model import forward, lm_head
-from tiny.quantize import LM_HEAD_INT8, quantize_rows, quantize_weights
+from tiny.quantize import LM_HEAD_INT8, quantize_rows
+from tiny.weights import load_weights
 
 needs_mps = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no Apple GPU")
 
@@ -129,6 +130,17 @@ def test_quantize_weights_quantizes_exactly_the_projections(config, weights, wei
     assert weights_int8["model.norm.weight"] is weights["model.norm.weight"]
     assert LM_HEAD_INT8 in weights_int8 and LM_HEAD_INT8 not in weights
     assert isinstance(weights["model.layers.0.self_attn.q_proj.weight"], torch.Tensor)
+
+
+def test_load_weights_int8_quantizes(config):
+    """load_weights(int8=True) is quantize_weights applied at load, in the
+    requested dtype -- the flag reaches the weights, and the scales follow
+    dtype."""
+    w = load_weights(dtype=torch.bfloat16, int8=True)
+
+    q, scale = w["model.layers.0.mlp.down_proj.weight"]
+    assert q.dtype == torch.int8 and scale.dtype == torch.bfloat16
+    assert LM_HEAD_INT8 in w
 
 
 def test_lm_head_reads_the_int8_copy_when_present():

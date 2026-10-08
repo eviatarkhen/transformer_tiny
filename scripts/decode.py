@@ -22,7 +22,6 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from tiny.attention import allocate_cache
 from tiny.config import Config, model_dir
 from tiny.model import forward
-from tiny.quantize import quantize_weights
 from tiny.weights import load_weights
 
 parser = argparse.ArgumentParser()
@@ -38,9 +37,7 @@ args = parser.parse_args()
 t0 = time.perf_counter()
 config = Config.from_json(model_dir() / "config.json")
 dtype = {"f32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
-w = load_weights(dtype=dtype, device=args.device)
-if args.int8:
-    w = quantize_weights(w)
+w = load_weights(dtype=dtype, device=args.device, int8=args.int8)
 print(f"load:    {time.perf_counter() - t0:6.2f} s")
 
 torch.manual_seed(0)

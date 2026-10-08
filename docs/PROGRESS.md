@@ -142,7 +142,10 @@ Decisions:
   symmetric, one scale per output row, `scale = max|row| / 127` floored at
   1e-12 for all-zero rows, kept in the weight's dtype (the kernel needs the
   activations' dtype), q rounded against the stored scale.
-  `quantize_weights(w)` returns a new dict.
+  `quantize_weights(w)` returns a new dict. Reached through
+  **`load_weights(..., int8=True)`** (added on Eviatar's question), so dtype,
+  device and quantization are chosen in one place. Not in `Config`: that
+  describes the checkpoint, and the same checkpoint runs in every format.
 - **Quantized: the 7 `*_proj.weight` of every layer, and the LM head** as a
   separate int8 copy under `LM_HEAD_INT8 = "lm_head.int8"` -- a key no
   checkpoint has, so step 7's tied-table reading is unchanged for plain
