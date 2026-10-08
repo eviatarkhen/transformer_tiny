@@ -145,4 +145,6 @@ to write; that is where its decisions live.
 ```
 uv run pytest                  # the ground truth
 uv run python scripts/smoke.py # HF reference output
+uv run python scripts/chat.py  # chat with tiny/'s model (MPS, int8, greedy)
+uv run python scripts/decode.py # benchmark / profile workload
 ```
