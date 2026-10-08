@@ -2,6 +2,13 @@ import torch
 
 from tiny.model import embed, run_blocks
 
+# The stream reaches ~2,000 after 28 blocks, where one float32 rounding step
+# is 2.3e-4: the usual 1e-4 is finer than the numbers can be stored. It held
+# only while our attention matmuls had HF eager's exact shapes (0.0 diff);
+# grouped-query attend (step 10) sums in a different order and the measured
+# floor is 1.5e-4. The smallest bug these tests exist for moves it by 5,110.
+STREAM_ATOL = 1e-3
+
 
 def hf_stack(ids, hf_model, position_ids=None):
     """The oracle: what HF's last decoder layer returns, before the final norm.
@@ -41,7 +48,7 @@ def test_matches_hf(config, weights, hf_model_eager):
     expected = hf_stack(ids, hf_model_eager)
 
     assert got.shape == (batch, seq, config.hidden_size)
-    torch.testing.assert_close(got, expected, atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(got, expected, atol=STREAM_ATOL, rtol=1e-5)
 
 
 def test_matches_hf_at_non_default_positions(config, weights, hf_model_eager):
@@ -67,4 +74,4 @@ def test_matches_hf_at_non_default_positions(config, weights, hf_model_eager):
         ids, hf_model_eager, position_ids=positions.expand(batch, -1)
     )
 
-    torch.testing.assert_close(got, expected, atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(got, expected, atol=STREAM_ATOL, rtol=1e-5)

@@ -1,6 +1,6 @@
 import torch
 
-from tiny.attention import attention
+from tiny.attention import Cache, attention
 from tiny.config import Config
 from tiny.layers import project, rms_norm
 from tiny.mlp import mlp
@@ -13,7 +13,7 @@ def block(
     config: Config,
     layer: int,
     positions: torch.Tensor,
-    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+    cache: Cache | None = None,
 ) -> torch.Tensor:
     """One decoder block: an attention half, then an MLP half.
 
@@ -64,7 +64,7 @@ def run_blocks(
     w: dict[str, torch.Tensor],
     config: Config,
     positions: torch.Tensor,
-    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+    cache: Cache | None = None,
 ) -> torch.Tensor:
     """Run all layers blocks
 
@@ -136,7 +136,7 @@ def forward(
     w: dict[str, torch.Tensor],
     config: Config,
     positions: torch.Tensor,
-    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+    cache: Cache | None = None,
 ) -> torch.Tensor:
     """The whole model: token ids in, next-token logits out.
 

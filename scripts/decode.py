@@ -18,6 +18,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")  # model_dir() otherwise contacts t
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
+from tiny.attention import allocate_cache
 from tiny.config import Config, model_dir
 from tiny.model import forward
 from tiny.weights import load_weights
@@ -39,7 +40,8 @@ print(f"load:    {time.perf_counter() - t0:6.2f} s")
 
 torch.manual_seed(0)
 ids = torch.randint(0, config.vocab_size, (1, args.prompt_len)).to(args.device)
-cache = None if args.no_cache else [None] * config.num_hidden_layers
+max_len = args.prompt_len + args.tokens + 1
+cache = None if args.no_cache else allocate_cache(config, 1, max_len, like=w["model.embed_tokens.weight"])
 
 
 def decode():

@@ -1,6 +1,7 @@
 import torch
 
 from tiny.config import Config
+from tiny.attention import allocate_cache
 from tiny.model import forward
 
 
@@ -43,7 +44,10 @@ def greedy(
     if ids.shape[0] != 1:
         raise ValueError(f"greedy takes one prompt, got a batch of {ids.shape[0]}")
 
-    cache = [None] * config.num_hidden_layers if use_cache else None
+    cache = None
+    if use_cache:
+        max_len = ids.shape[1] + max_new_tokens
+        cache = allocate_cache(config, 1, max_len, like=w["model.embed_tokens.weight"])
     start = 0
     for _ in range(max_new_tokens):
         logits = forward(ids[:, start:], w, config, torch.arange(start, ids.shape[1], device=ids.device), cache)

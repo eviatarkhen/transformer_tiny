@@ -22,42 +22,74 @@ def merge_heads(x: torch.Tensor) -> torch.Tensor:
     return x.transpose(1, 2).reshape(batch, seq, heads * head_dim)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """(batch, kv_heads, seq, head_dim) -> (batch, kv_heads * n_rep, seq, head_dim).
+# One slot per layer: {"k": buffer, "v": buffer, "len": slots filled so far}.
+Cache = list[dict]
 
-    Under GQA each key/value head is shared by n_rep query heads. The copies are
-    adjacent, so kv head i serves query heads i*n_rep .. (i + 1)*n_rep - 1.
-    Tiling instead (repeat) gives the same shape and pairs the wrong heads.
+
+def allocate_cache(
+    config: Config, batch: int, max_len: int, like: torch.Tensor
+) -> Cache:
+    """Allocate every layer's key and value buffers once, at full size.
+
+    Args:
+        config: architecture -- layers, kv heads, head_dim.
+        batch: prompts in the batch, 1 for greedy.
+        max_len: the most tokens the cache will ever hold. greedy passes
+            prompt length + max_new_tokens, one spare: the last token it
+            generates is never fed back through the model.
+        like: any tensor with the model's dtype and device, e.g. the
+            embedding table. The buffers copy both, as causal_mask does.
+
+    Returns:
+        num_hidden_layers slots, each with k and v buffers of shape
+        (batch, kv_heads, max_len, head_dim) and len 0. Held in full from the
+        start: 229 KB per token for this model in float32, 115 KB in bf16.
     """
-    return x.repeat_interleave(n_rep, dim=1)
+    shape = (batch, config.num_key_value_heads, max_len, config.head_dim)
+    return [
+        {"k": like.new_zeros(shape), "v": like.new_zeros(shape), "len": 0}
+        for _ in range(config.num_hidden_layers)
+    ]
 
 
 def update_cache(
-    cache: list[tuple[torch.Tensor, torch.Tensor] | None],
+    cache: Cache,
     layer: int,
     k_new: torch.Tensor,
     v_new: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Join this turn's keys and values to the layer's stored ones.
+    """Write this turn's keys and values into the layer's buffers, in place.
+
+    Each call copies only the new tokens. The previous design joined old and
+    new with torch.cat, which allocates a fresh tensor and copies the whole
+    history every turn: 688 MB per turn at 3,000 tokens, to add 229 KB.
 
     Args:
-        cache: one slot per layer. A slot is None until the layer's first call,
-            then (k, v) for every token seen so far. MODIFIED IN PLACE: calling
-            twice with the same k_new stores those tokens twice.
-        layer: which slot to read and replace.
-        k_new, v_new: (batch, heads, new, head_dim), the keys and values of the
-            tokens in this call -- the whole prompt at prefill, one token after.
+        cache: from allocate_cache. MODIFIED IN PLACE: calling twice with the same
+            k_new stores those tokens twice.
+        layer: which slot to write.
+        k_new, v_new: (batch, kv_heads, new, head_dim), the keys and values
+            of the tokens in this call -- the whole prompt at prefill, one
+            token after.
 
     Returns:
-        (k, v), each (batch, heads, stored + new, head_dim): the old tokens
-        first, then the new ones. The same pair is what the slot now holds.
+        (k, v), each (batch, kv_heads, filled, head_dim): views of the filled
+        part of the buffers, old tokens first. A view, not a copy.
+
+    Notes:
+        The write position is a Python int kept in the slot, not read from
+        positions: reading a tensor's value with .item() makes the CPU wait
+        for the GPU, 28 times a turn on MPS.
     """
-    if cache[layer] is not None:
-        k_old, v_old = cache[layer]
-        k_new = torch.cat([k_old, k_new], dim=-2)
-        v_new = torch.cat([v_old, v_new], dim=-2)
-    cache[layer] = (k_new, v_new)
-    return k_new, v_new
+    slot = cache[layer]
+    start = slot["len"]
+    end = start + k_new.shape[-2]
+    if end > slot["k"].shape[-2]:
+        raise ValueError(f"cache holds {slot['k'].shape[-2]} tokens, asked for {end}")
+    slot["k"][:, :, start:end] = k_new
+    slot["v"][:, :, start:end] = v_new
+    slot["len"] = end
+    return slot["k"][:, :, :end], slot["v"][:, :, :end]
 
 
 def causal_mask(scores: torch.Tensor) -> torch.Tensor:
@@ -82,18 +114,30 @@ def causal_mask(scores: torch.Tensor) -> torch.Tensor:
 
 
 def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Causal scaled dot-product attention.
+    """Causal scaled dot-product attention, grouped-query.
 
     Args:
         q: (batch, heads, q_len, head_dim).
-        k, v: (batch, heads, k_len, head_dim), already expanded to q's head
-            count by repeat_kv. k_len >= q_len: with a cache, k and v also hold
-            every earlier token, and q's rows are the last q_len of them.
+        k, v: (batch, kv_heads, k_len, head_dim), with heads a multiple of
+            kv_heads. k_len >= q_len: with a cache, k and v also hold every
+            earlier token, and q's rows are the last q_len of them.
 
     Returns:
         (batch, heads, q_len, head_dim).
 
     Notes:
+        Under GQA each kv head serves n_rep = heads // kv_heads adjacent query
+        heads: kv head i serves query heads i*n_rep .. (i+1)*n_rep - 1. Rather
+        than copying k and v up to q's head count (the old repeat_kv, which
+        rewrote the whole cache, doubled, every layer, every turn), q is
+        regrouped: (batch, heads, ...) viewed as (batch, kv_heads, n_rep, ...)
+        is exactly that adjacent pairing. Tiling instead -- (n_rep, kv_heads)
+        -- would give the same shapes and pair the wrong heads.
+
+        For the mask the scores are viewed as (batch, kv_heads, n_rep, q_len,
+        k_len): the last two dimensions are still (q_len, k_len), so
+        causal_mask needs no change.
+
         The scale is read off q's own last dimension rather than passed in, so
         this needs no config and can be unit tested on toy sizes.
 
@@ -103,10 +147,21 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         because it is the decision, and a backend that did not do it
         silently would lose small weights to rounding.
     """
-    scores = (q @ k.transpose(-2, -1)) * q.shape[-1] ** -0.5
+    batch, heads, q_len, head_dim = q.shape
+    kv_heads = k.shape[1]
+    n_rep = heads // kv_heads
+
+    # The n_rep query heads of a group stacked as rows: one plain matmul per
+    # kv head. No broadcasting -- matmul would implement it by copying k.
+    q = q.reshape(batch, kv_heads, n_rep * q_len, head_dim)
+    scores = (q @ k.transpose(-2, -1)) * head_dim ** -0.5
+
+    scores = scores.view(batch, kv_heads, n_rep, q_len, -1)
     scores = scores + causal_mask(scores)
     weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
-    return weights @ v
+
+    weights = weights.view(batch, kv_heads, n_rep * q_len, -1)
+    return (weights @ v).view(batch, heads, q_len, head_dim)
 
 
 def attention(
@@ -115,7 +170,7 @@ def attention(
     config: Config,
     layer: int,
     positions: torch.Tensor,
-    cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+    cache: Cache | None = None,
 ) -> torch.Tensor:
     """Grouped-query causal self-attention for one block.
 
@@ -130,11 +185,10 @@ def attention(
             are built from them here: they are this function's detail, and
             recomputing a (seq, head_dim) table per layer is noise next to
             the matmuls.
-        cache: optional, see update_cache. None means no cache, exactly as
-            before. Given, this layer's keys and values are stored after RoPE
-            and before repeat_kv: a key's rotation depends only on its own
-            position, so it is final once made, and storing 8 heads rather
-            than 16 halves the memory.
+        cache: optional, from allocate_cache. None means no cache. Given, this
+            layer's keys and values are stored after RoPE, at kv_heads: a
+            key's rotation depends only on its own position, so it is final
+            once made, and 8 heads rather than 16 halve the memory.
 
     Returns:
         (batch, seq, hidden_size), the same shape as x.
@@ -156,9 +210,5 @@ def attention(
 
     if cache is not None:
         k, v = update_cache(cache, layer, k, v)
-
-    n_rep = heads // kv_heads
-    k = repeat_kv(k, n_rep)
-    v = repeat_kv(v, n_rep)
 
     return project(merge_heads(attend(q, k, v)), w[p + "o_proj.weight"])

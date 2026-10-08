@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from tiny.attention import causal_mask
+from tiny.attention import causal_mask, allocate_cache
 from tiny.generate import greedy
 from tiny.layers import rms_norm
 from tiny.model import forward
@@ -42,6 +42,18 @@ def test_causal_mask_follows_the_scores_dtype():
 
     assert mask.dtype == torch.bfloat16
     assert torch.equal(mask.float(), causal_mask(torch.zeros(3, 6)))
+
+
+def test_allocate_cache_follows_like(config):
+    """The buffers take dtype and device from `like`, never the default.
+
+    A float32 buffer would silently upcast every bf16 key written into it,
+    and the next matmul against bf16 queries would raise. No bf16 test runs
+    with a cache, so this is the only place that would show it off-MPS.
+    """
+    cache = allocate_cache(config, 1, 8, like=torch.zeros(1, dtype=torch.bfloat16))
+
+    assert all(s["k"].dtype == s["v"].dtype == torch.bfloat16 for s in cache)
 
 
 # --- bf16: the whole model --------------------------------------------------

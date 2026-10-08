@@ -12,7 +12,6 @@ from tiny.attention import (
     causal_mask,
     merge_heads,
     project,
-    repeat_kv,
     split_heads,
 )
 from tiny.weights import layer_prefix
@@ -98,39 +97,31 @@ def test_merge_heads_is_not_a_bare_reshape(config):
     assert not torch.equal(merge_heads(x), bare)
 
 
-def test_repeat_kv_matches_hf(config):
-    """Equals HF's repeat_kv, which is the expand/reshape spelling."""
-    batch, seq = 2, 5
-    n_rep = config.num_attention_heads // config.num_key_value_heads
+def test_attend_groups_adjacent_query_heads(config):
+    """Grouped attend equals plain attention against k, v copied up to q's
+    head count with HF's repeat_kv -- the layout the checkpoint was trained
+    with: kv head i serves query heads i*n_rep .. (i+1)*n_rep - 1.
 
-    torch.manual_seed(0)
-    x = torch.randn(batch, config.num_key_value_heads, seq, config.head_dim)
-
-    assert torch.equal(repeat_kv(x, n_rep), hf_repeat_kv(x, n_rep))
-
-
-def test_repeat_kv_pairs_adjacent_heads(config):
-    """kv head i must serve query heads i*n_rep .. (i+1)*n_rep - 1.
-
-    Tiling (x.repeat) gives the identical shape but pairs kv head i with query
-    heads i, i + kv_heads, ... -- the wrong grouping, and invisible to a shape
-    check. The second clause rules that out explicitly.
+    Tiling (x.repeat) gives the identical shapes but pairs kv head i with
+    query heads i, i + kv_heads, ... -- the wrong grouping, invisible to a
+    shape check. The second clause rules out an attend that groups that way.
     """
-    batch, seq = 1, 5
-    n_rep = config.num_attention_heads // config.num_key_value_heads
+    batch, seq, head_dim = 2, 5, 8
+    heads, kv_heads = config.num_attention_heads, config.num_key_value_heads
+    n_rep = heads // kv_heads
 
     torch.manual_seed(0)
-    x = torch.randn(batch, config.num_key_value_heads, seq, config.head_dim)
-    out = repeat_kv(x, n_rep)
+    q = torch.randn(batch, heads, seq, head_dim)
+    k = torch.randn(batch, kv_heads, seq, head_dim)
+    v = torch.randn(batch, kv_heads, seq, head_dim)
 
-    assert out.shape == (batch, config.num_attention_heads, seq, config.head_dim)
-    for i in range(config.num_key_value_heads):
-        for j in range(n_rep):
-            assert torch.equal(out[:, i * n_rep + j], x[:, i])
+    got = attend(q, k, v)
+    expected = attend(q, hf_repeat_kv(k, n_rep), hf_repeat_kv(v, n_rep))
+    tiled = attend(q, k.repeat(1, n_rep, 1, 1), v.repeat(1, n_rep, 1, 1))
 
-    tiled = x.repeat(1, n_rep, 1, 1)
-    assert tiled.shape == out.shape
-    assert not torch.equal(out, tiled)
+    assert got.shape == q.shape
+    torch.testing.assert_close(got, expected, atol=1e-6, rtol=0)
+    assert not torch.allclose(got, tiled)
 
 
 def test_causal_mask_structure():
@@ -235,8 +226,7 @@ def test_attend_is_causal():
 
 
 def test_attend_preserves_shape():
-    """Output matches q's shape, including when k and v carry fewer rows of
-    information than q has heads (post repeat_kv they are the same shape)."""
+    """Output matches q's shape."""
     torch.manual_seed(3)
     q = torch.randn(2, 4, 7, 16)
     k = torch.randn(2, 4, 7, 16)

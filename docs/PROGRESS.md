@@ -10,22 +10,20 @@ continue from "Next action".
 
 ## Next action
 
-**Step 10: optimize -- piece 1 (bf16 + MPS) done; pieces 2-3 next.** Eviatar
-chose all three candidates, bf16 first. Remaining, in this order:
+**Step 10: optimize -- pieces 1 (bf16 + MPS) and 2 (preallocated cache)
+done; piece 3, `torch.compile`, next.** Not started; theory not delivered.
 
-1. **Preallocated KV cache.** `update_cache` copies the whole cache every
-   turn (`cat`), and so does `repeat_kv` (`repeat_interleave`, 8 -> 16 heads,
-   every layer). Both grow with context. Fixed-size buffers also make shapes
-   static, which piece 3 needs.
-2. **`torch.compile`.** MPS float32 gained only 1.16x end to end against
-   1.9x on its matmuls: ~600 small ops per turn, each with a fixed GPU launch
-   cost (2.8 us vs 0.7 on CPU). Fusion attacks exactly that. A growing cache
-   forces recompiles, hence piece 1 first.
+Why it is next: MPS gained nothing from piece 2 (43.4 -> 43.4 tok/s f32)
+and only 1.16x over CPU from piece 1, against 1.9x on its matmuls alone.
+~600 small ops per turn, each with a fixed GPU launch cost (2.8 us vs 0.7 us
+on CPU), dominate there. Fusion attacks exactly that. Shapes are now static
+per buffer, except the filled-length slice `[:, :, :len]`, which grows every
+turn -- expect compile to recompile on it, or to need the whole buffer
+attended with a positions-based mask. That is the design question.
 
 Benchmark with `scripts/decode.py` (`--dtype bf16 --device mps`,
 `--no-cache`, `--torch-profile`). Speed to beat, 100-token prompt + 300
-tokens: **CPU f32 36.0, CPU bf16 21.2, MPS f32 43.4, MPS bf16 46.8 tok/s.**
-Short runs understate MPS (first calls compile GPU kernels).
+tokens: **CPU f32 43.2, CPU bf16 31.5, MPS f32 43.4, MPS bf16 47.9 tok/s.**
 
 ## Step status
 
@@ -41,7 +39,7 @@ Short runs understate MPS (first calls compile GPU kernels).
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
 | 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
-| 10 | optimize | **in progress** (bf16 + MPS done) | `tests/test_dtype_device.py`, 6 tests |
+| 10 | optimize | **in progress** (bf16 + MPS, preallocated cache done) | `tests/test_dtype_device.py`, 7 tests; `test_kv_cache` |
 | 11 | sampling | not started | — |
 
 ## Environment (verified 2026-09-16)
@@ -111,6 +109,58 @@ Two lessons recorded from it:
 - "sin/cos swapped" legitimately passes the relative-position test: it is still a
   rotation linear in position, so the property genuinely still holds. A property
   test claims its property and nothing more.
+
+## Step 10, piece 2: preallocated cache, no repeat_kv
+
+**Written by Claude**, code and tests, as piece 1. Measured first, decode
+turns only (CPU f32): cache copies (`cat` in `update_cache`, `copy_` from
+`repeat_interleave`) were 12% of a turn at 100 context, 29% at 1,000, **44%
+at 3,000** -- more than the weight matmuls. At 3,000 tokens the cache is
+688 MB, copied every turn to add 229 KB.
+
+Design:
+
+- **`allocate_cache(config, batch, max_len, like)`** (Eviatar renamed it
+  from `new_cache`): every layer's k and v buffers allocated once, dtype and
+  device from `like` via `new_zeros`. A slot is `{"k", "v", "len"}`. greedy
+  sizes it prompt + max_new_tokens -- one spare, since the last generated
+  token is never fed back (the "max_len 1 short" mutant is equivalent).
+- **`update_cache` keeps its signature**: writes only the new tokens at
+  `len`, returns a *view* of the filled part, raises ValueError on overflow.
+  The write position is a Python int, **not** read from `positions` as first
+  proposed: `.item()` on an MPS tensor makes the CPU wait for the GPU, 28
+  times a turn. `positions` stays for RoPE only.
+- **`repeat_kv` deleted; `attend` groups q instead.** `q.reshape(batch,
+  kv_heads, n_rep * q_len, head_dim)` is the adjacent pairing. Folded into
+  rows rather than broadcast against `k.unsqueeze(2)`: matmul implements a
+  broadcast batch dim by expanding and copying, which is the copy being
+  removed. Scores are viewed `(..., n_rep, q_len, k_len)` for the mask, so
+  `causal_mask` is untouched.
+- **Stream tolerance in `test_run_blocks` raised to 1e-3**, with the reason
+  in the file. The stream reaches ~1,923, where one float32 step is 2.3e-4;
+  1e-4 held only by bit-exactness with HF eager's matmul shapes. Grouped
+  attend measured 7e-7 vs the expanded spelling, 1.5e-4 on the stream,
+  4e-5 on the logits (which keep 1e-4).
+
+Result, decode turns: 37.5 -> 44.9 tok/s at 100 context, 25.9 -> 38.5 at
+1,000, **13.9 -> 26.0 at 3,000**; copies 44% -> 0.7%. Whole runs: CPU f32
+36.0 -> 43.2, CPU bf16 21.2 -> 31.5, MPS unchanged (overhead-bound).
+
+### Step 10 piece 2 mutation matrix
+
+| mutation | caught by |
+|---|---|
+| len never advanced | all three update_cache, cache length, cached forward, greedy[cache] |
+| whole buffer returned, not the filled part | both update_cache, cached forward, greedy[cache] |
+| k and v swapped on write | both update_cache, cached forward, greedy[cache] |
+| overflow check removed | **only** refuses_to_overflow |
+| buffers ignore `like` | only greedy_on_mps -- **then a hole off-Mac**; added `test_allocate_cache_follows_like` |
+| one buffer shared by all layers | cache length, cached forward, greedy, MPS greedy |
+| attend groups query heads tiled | attend_groups_adjacent + 34 parity tests |
+| mask on the folded scores | 41 tests |
+| greedy max_len 2 short | greedy[cache], MPS greedy |
+| greedy max_len 1 short | **none -- equivalent** (one spare slot) |
+
 
 ## Step 10, piece 1: bf16 and MPS
 
