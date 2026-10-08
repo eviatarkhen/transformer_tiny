@@ -10,13 +10,11 @@ continue from "Next action".
 
 ## Next action
 
-**Step 10: optimize -- three pieces done** (bf16 + MPS, preallocated cache,
-int8 weight-only quantization). Nothing is queued. Open directions, none
-chosen: int4 (needs groups; 10-21% output error per matrix measured, and
-packing two values per byte), `torch.compile` (withdrawn, notes below), or
-close step 10 and move to step 11, sampling.
+**Step 11: sampling.** Not started; theory not yet delivered. Step 10 closed
+2026-10-08 with three pieces (bf16 + MPS, preallocated cache, int8); int4
+and `torch.compile` left as sequels.
 
-Speed now, 100-token prompt + 300 tokens (MPS runs vary ~15% run to run):
+Step 10's final speed, 100-token prompt + 300 tokens (MPS runs vary ~15% run to run):
 
 | | float weights | int8 weights |
 |---|---|---|
@@ -54,8 +52,8 @@ tokens: **CPU f32 43.2, CPU bf16 31.5, MPS f32 43.4, MPS bf16 47.9 tok/s.**
 | 7 | full model | **done** | 5 files, 8 tests: `test_embed`, `test_run_blocks`, `test_final_norm`, `test_lm_head`, `test_forward` |
 | 8 | greedy generation | **done** | `tests/test_generate.py`, 2 tests |
 | 9 | KV cache | **done** | `tests/test_kv_cache.py`, 7 tests; `test_generate` now 4 (both cache modes) |
-| 10 | optimize | **3 pieces done** (bf16 + MPS, preallocated cache, int8) | `test_dtype_device` 7, `test_quantize` 10 |
-| 11 | sampling | not started | — |
+| 10 | optimize | **done** (bf16 + MPS, preallocated cache, int8) | `test_dtype_device` 7, `test_quantize` 10 |
+| 11 | sampling | next | — |
 
 ## Environment (verified 2026-09-16)
 
